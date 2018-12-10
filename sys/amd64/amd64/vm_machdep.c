@@ -94,6 +94,75 @@ static u_int	cpu_reset_proxyid;
 static volatile u_int	cpu_reset_proxy_active;
 #endif
 
+/**
+ * missing part syscall-04: doreti
+*/
+static inline void sva_missing_thr_new_full_restore_3f(struct thread *td){
+  if (td != curthread){
+	  panic("Lele: td is expected to be curthread\n");
+  }
+
+  if (td->td_frame->tf_cs & 0xff & SEL_RPL_MASK){
+
+		/* doreti_ast: */
+		disable_intr();
+		while (td->td_flags & (TDF_ASTPENDING | TDF_NEEDRESCHED)){
+			ast (td->td_frame);
+			disable_intr();
+		}
+	}
+	/* doreti_exit: */
+	struct pcb *curpcb_ = PCPU_GET(curpcb);
+	
+	/* testb	$SEL_RPL_MASK,TF_CS(%rsp) 
+	   jz	ld_regs*/
+	if ((SEL_RPL_MASK & td->td_frame->tf_cs & 0xff ) && 
+	/* testl	$PCB_FULL_IRET,PCB_FLAGS(%r8) 
+	   jz	ld_regs*/
+	(td->td_pcb->pcb_flags & PCB_FULL_IRET & 0xffffffff) ){  
+		/*
+		testl	$TF_HASSEGS,TF_FLAGS(%rsp)
+		je	set_segs
+		*/
+		if (!(td->td_frame->tf_flags & TF_HASSEGS)){
+			/* set_segs: */
+		    // td->td_frame->tf_ds = GSEL(GUDATA_SEL, SEL_UPL);
+		    // td->td_frame->tf_es = GSEL(GUDATA_SEL, SEL_UPL);
+			td->td_frame->tf_fs = GSEL(GUFS32_SEL, SEL_UPL);
+			// td->td_frame->tf_gs = GSEL(GUGS32_SEL, SEL_UPL);
+		}
+
+		/*			
+		do_segs:
+			// Restore %fs and fsbase 
+			movw	TF_FS(%rsp),%ax
+			.globl	ld_fs
+		ld_fs:
+			movw	%ax,%fs
+			cmpw	$KUF32SEL,%ax
+			jne	1f
+			movl	$MSR_FSBASE,%ecx
+			movl	PCB_FSBASE(%r8),%eax
+			movl	PCB_FSBASE+4(%r8),%edx
+			.globl	ld_fsbase
+		ld_fsbase:
+			wrmsr
+		*/
+		load_fs(td->td_frame->tf_fs);
+	    if (td->td_frame->tf_fs == GSEL(GUFS32_SEL, SEL_UPL)){
+
+			wrmsr(MSR_FSBASE, td->td_pcb->pcb_fsbase);
+		
+		}
+		
+	}else{
+		  // ld_regs
+		  /* Those are done in SVA */
+	}
+
+}
+
+
 #if 1
 void
 kernel_thread_trampoline (struct thread * td)
@@ -102,6 +171,11 @@ kernel_thread_trampoline (struct thread * td)
                         void *arg,
                         struct trapframe *frame);
 
+#if defined (TLS_PATCH_THR_NEW) // Lele: disable this patch since multi-threading library is not supported yet
+
+	sva_missing_thr_new_full_restore_3f(td);
+
+#endif // TRACK_HELLO && TRACK_HELLLO_THR_NEW
   /*
    * Call the specified function.
    */
@@ -498,6 +572,19 @@ cpu_set_upcall(struct thread *td, struct thread *td0)
   td->sva = 1;
   td->callout = fork_return;
   td->callarg = td;
+
+  /* Lele: this will affect how thr_new behaves. Original kernel
+	set fork_trampoline as starting address for new thread upon scheduled. It calls fork_exit and then doreti for syscall return.
+
+	However, the sva_init_stack would make the starting address of new thread
+	as kernel_thread_trampoline, and use 'sc_ret' for syscall return.
+
+	However, 'sc_ret' has missing part compared to doreti in terms of FSBASE restore for CPU. Therefore, we need either: 
+		1) update sc_ret to support FSBASE restore by adding fsbase to integer state.
+	or
+		2) hacking kernel_thread_trampoline. as shown above in sva_missing_thr_new_full_restore_3f
+
+   */
   td->svaID = sva_init_stack (td->td_kstack,
 	                            stacklen,
 	                            kernel_thread_trampoline,

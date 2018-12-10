@@ -1674,6 +1674,81 @@ amd64_syscall(struct thread *td, int traced)
 	syscallret(td, error, &sa);
 }
 
+/**
+ * missing part syscall-04: doreti in exception.S
+*/
+
+static inline void sva_missing_full_restore_3f(struct thread *td){
+	if (td != curthread){
+		panic("Lele: td is expected to be curthread\n");
+	}
+
+	if (td->td_frame->tf_cs & 0xff & SEL_RPL_MASK){
+
+		/* doreti_ast: */
+		disable_intr();
+		while (td->td_flags & (TDF_ASTPENDING | TDF_NEEDRESCHED)){
+				// enable_intr();
+				ast (td->td_frame); // will enable intr in ast()
+				disable_intr();
+				// BUFFER_WRITE("done ast; now go back to check ast again\n");
+		}
+	}
+  	/* doreti_exit: */
+	/*
+		* Do not reload segment registers for kernel.
+		* Since we do not reload segments registers with sane
+		* values on kernel entry, descriptors referenced by
+		* segments registers might be not valid.  This is fatal
+		* for user mode, but is not a problem for the kernel.
+		*/
+	struct pcb *curpcb_ = PCPU_GET(curpcb);
+	
+	/* testb	$SEL_RPL_MASK,TF_CS(%rsp) 
+	   jz	ld_regs*/
+	if ((SEL_RPL_MASK & td->td_frame->tf_cs & 0xff ) && 
+	/* testl	$PCB_FULL_IRET,PCB_FLAGS(%r8) 
+	   jz	ld_regs*/
+	// (td->td_pcb->pcb_flags & PCB_FULL_IRET & 0xffffffff)
+	(curpcb_->pcb_flags & PCB_FULL_IRET & 0xffffffff) ){  
+		/*
+		testl	$TF_HASSEGS,TF_FLAGS(%rsp)
+		je	set_segs
+		*/
+		if (!(td->td_frame->tf_flags & TF_HASSEGS)){
+			td->td_frame->tf_fs = GSEL(GUFS32_SEL, SEL_UPL);
+		}
+
+		/*
+		do_segs:
+			// Restore %fs and fsbase 
+			movw	TF_FS(%rsp),%ax
+			.globl	ld_fs
+		ld_fs:
+			movw	%ax,%fs
+			cmpw	$KUF32SEL,%ax
+			jne	1f
+			movl	$MSR_FSBASE,%ecx
+			movl	PCB_FSBASE(%r8),%eax
+			movl	PCB_FSBASE+4(%r8),%edx
+			.globl	ld_fsbase
+		ld_fsbase:
+			wrmsr
+		*/
+
+		load_fs(td->td_frame->tf_fs);
+
+      	if (td->td_frame->tf_fs == GSEL(GUFS32_SEL, SEL_UPL)){
+			wrmsr(MSR_FSBASE, curpcb_->pcb_fsbase);
+		}
+
+	}else{
+		  // ld_regs
+		  /* Those should be already done in SVA */
+	}
+
+}
+
 #if 1
 /*
  *	syscall -	system call request C handler
@@ -1700,6 +1775,9 @@ sva_syscall(struct thread *td, int traced)
   td = curthread;
   traced = 0;
 
+  /* missing part syscall-01: reset td_pcb->pcb_flags */
+  td->td_pcb->pcb_flags &= (~PCB_FULL_IRET & 0xffffffff);
+  
   /*
    * Install a trap frame into the thread structure.
    */
@@ -1711,6 +1789,12 @@ sva_syscall(struct thread *td, int traced)
 	 */
 	extern void sva_syscall_trapframe (struct trapframe * tf);
 	sva_syscall_trapframe (&localframe);
+
+	/* Lele: missing part 02: 
+		movl	$TF_HASSEGS,TF_FLAGS(%rsp)
+	*/
+	td->td_frame->tf_flags &= TF_HASSEGS;
+
 #if 0
   traced = localframe.tf_rflags & PSL_T;
 #endif
@@ -1744,10 +1828,52 @@ sva_syscall(struct thread *td, int traced)
 
 	syscallret(td, error, &sa);
 
+  /**
+   * missing part 03
+   1:	movq	PCPU(CURPCB),%rax
+	// Disable interrupts before testing PCB_FULL_IRET. 
+    cli
+	testl	$PCB_FULL_IRET,PCB_FLAGS(%rax)
+	jnz	3f
+	// Check for and handle AST's on return to userland. 
+	movq	PCPU(CURTHREAD),%rax
+	testl	$TDF_ASTPENDING | TDF_NEEDRESCHED,TD_FLAGS(%rax)
+	jne	2f
+	// Restore preserved registers. 
+	MEXITCOUNT
+
+  */
+begin_1f:
+	
+	disable_intr();
+
+	if(td->td_pcb->pcb_flags & PCB_FULL_IRET) {
+	goto full_restore_reti_3f;  // 3f
+	}else{
+	//handle ast 
+	goto ast_2f;
+	}
+
+ast_2f:
+
 #if 1
   /* SVA: The SVA assembly code does not run the AST */
-  if (curthread->td_flags & (TDF_ASTPENDING | TDF_NEEDRESCHED))
+  if (curthread->td_flags & (TDF_ASTPENDING | TDF_NEEDRESCHED)){
+	enable_intr();
     ast (&localframe);
+	goto begin_1f;
+  }else{
+	 //no full iret, no ast, now exit
+	  goto out__;
+  }
 #endif
+
+full_restore_reti_3f:
+
+	sva_missing_full_restore_3f(td);
+	
+out__:
+	enable_intr(); //just in case intr got masked in sva_missing_full_restore_3f
+
 }
 #endif

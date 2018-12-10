@@ -284,7 +284,7 @@ ghost_sbrk (intptr_t incr) {
  */
 
 /* SVA: No TLS support for now */
-#define NO_TLS
+//#define NO_TLS
 
 #ifdef __i386__
 #  define LG_QUANTUM		4
