@@ -39,6 +39,10 @@
 #ifndef _MACHINE_CPUFUNC_H_
 #define	_MACHINE_CPUFUNC_H_
 
+#if 1
+#include "sva/interrupt.h"
+#endif
+
 #ifndef _SYS_CDEFS_H_
 #error this file needs sys/cdefs.h as a prerequisite
 #endif
@@ -109,7 +113,11 @@ clflush(u_long addr)
 static __inline void
 disable_intr(void)
 {
+#if 0
 	__asm __volatile("cli" : : : "memory");
+#else
+  sva_load_lif (0);
+#endif
 }
 
 static __inline void
@@ -131,7 +139,11 @@ cpuid_count(u_int ax, u_int cx, u_int *p)
 static __inline void
 enable_intr(void)
 {
+#if 0
 	__asm __volatile("sti");
+#else
+  sva_load_lif (1);
+#endif
 }
 
 #ifdef _KERNEL
@@ -382,7 +394,13 @@ static __inline void
 load_cr3(u_long data)
 {
 
+#if 0
 	__asm __volatile("movq %0,%%cr3" : : "r" (data) : "memory");
+#else
+  /* SVA: Use the intrinsic */
+  extern void sva_mm_load_pgtable (void * p);
+  sva_mm_load_pgtable ((void *)data);
+#endif
 }
 
 static __inline u_long

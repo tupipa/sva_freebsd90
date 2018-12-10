@@ -31,6 +31,7 @@ __FBSDID("$FreeBSD: release/9.0.0/sys/amd64/amd64/mp_machdep.c 223758 2011-07-04
 #include "opt_kstack_pages.h"
 #include "opt_sched.h"
 #include "opt_smp.h"
+#include "opt_sva_mmu.h"
 
 #include <sys/param.h>
 #include <sys/systm.h>
@@ -68,6 +69,15 @@ __FBSDID("$FreeBSD: release/9.0.0/sys/amd64/amd64/mp_machdep.c 223758 2011-07-04
 #include <machine/smp.h>
 #include <machine/specialreg.h>
 #include <machine/tss.h>
+
+#if 1
+#include <sva/init.h>
+#endif
+
+#ifdef SVA_MMU
+#include <sva/mmu_intrinsics.h>
+#define SVA_DEBUG 0
+#endif
 
 #define WARMBOOT_TARGET		0
 #define WARMBOOT_OFF		(KERNBASE + 0x0467)
@@ -615,7 +625,18 @@ init_secondary(void)
 	cpu = bootAP;
 
 	/* Init tss */
+#if 0
 	common_tss[cpu] = common_tss[0];
+#else
+  /*
+   * SVA: Don't reconfigure the SVA IST configuration.
+   */
+  {
+    uintptr_t ist = common_tss[cpu].tss_ist3;
+    common_tss[cpu] = common_tss[0];
+    common_tss[cpu].tss_ist3 = ist;
+  }
+#endif
 	common_tss[cpu].tss_rsp0 = 0;   /* not used until after switch */
 	common_tss[cpu].tss_iobase = sizeof(struct amd64tss) +
 	    IOPAGES * PAGE_SIZE;
@@ -664,7 +685,13 @@ init_secondary(void)
 	wrmsr(MSR_GSBASE, (u_int64_t)pc);
 	wrmsr(MSR_KGSBASE, (u_int64_t)pc);	/* XXX User value while we're in the kernel */
 
+#if 0
+	r_idt.rd_base = (long) idt;
 	lidt(&r_idt);
+#else
+  /* Initialize SVA for this processor */
+  sva_init_secondary();
+#endif
 
 	gsel_tss = GSEL(GPROC0_SEL, SEL_KPL);
 	ltr(gsel_tss);
@@ -676,7 +703,11 @@ init_secondary(void)
 	 */
 	cr0 = rcr0();
 	cr0 &= ~(CR0_CD | CR0_NW | CR0_EM);
+#ifdef SVA_MMU
+	sva_load_cr0(cr0);
+#else
 	load_cr0(cr0);
+#endif
 
 	/* Set up the fast syscall stuff */
 	msr = rdmsr(MSR_EFER) | EFER_SCE;

@@ -76,6 +76,10 @@ dtrace_vtime_switch_func_t	dtrace_vtime_switch_func;
 #include <machine/cpu.h>
 #include <machine/smp.h>
 
+#if 1
+#include "sva/state.h"
+#endif
+
 #if defined(__sparc64__)
 #error "This architecture is not currently compatible with ULE"
 #endif
@@ -1845,7 +1849,16 @@ sched_switch(struct thread *td, struct thread *newtd, int flags)
 			(*dtrace_vtime_switch_func)(newtd);
 #endif
 
+#if 0
 		cpu_switch(td, newtd, mtx);
+#else
+    extern void cpu_switch_sva (struct thread *, struct thread *, struct mtx *);
+    /*
+     * I'm currently testing on the 4BSD scheduler because it appears to have
+     * a simpler locking discipline.
+     */
+		cpu_switch_sva (td, newtd, mtx);
+#endif
 		/*
 		 * We may return from cpu_switch on a different cpu.  However,
 		 * we always return with td_lock pointing to the current cpu's
@@ -2591,7 +2604,11 @@ sched_throw(struct thread *td)
 	TDQ_LOCKPTR(tdq)->mtx_lock = (uintptr_t)newtd;
 	PCPU_SET(switchtime, cpu_ticks());
 	PCPU_SET(switchticks, ticks);
+#if 0
 	cpu_throw(td, newtd);		/* doesn't return */
+#else
+	cpu_throw_sva(td, newtd, td->td_lock);		/* doesn't return */
+#endif
 }
 
 /*

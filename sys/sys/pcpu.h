@@ -191,6 +191,17 @@ struct pcpu {
 	 * if only to make kernel debugging easier.
 	 */
 	PCPU_MD_FIELDS;
+
+	/*
+	 * Fields added to support SVA.  Normally, SVA would control the PCPU
+	 * data structure, but we allow FreeBSD to maintain control to make
+	 * porting simpler.
+	 */
+	void *	svaIContext;	/* Pointer to SVA CPUState */
+	uint64_t	svaRSP;	/* Saved RSP on system call */
+	uint64_t	svaRBP;	/* Saved RBP on system call */
+	uint64_t	svaRDI;	/* Saved RDI on system call */
+	uint64_t	svaRSI;	/* Saved RSI on system call */
 } __aligned(CACHE_LINE_SIZE);
 
 #ifdef _KERNEL

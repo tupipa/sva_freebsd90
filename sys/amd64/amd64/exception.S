@@ -46,6 +46,8 @@
 
 #include "assym.s"
 
+#include <sva/cfi.h>
+
 #ifdef KDTRACE_HOOKS
 	.bss
 	.globl	dtrace_invop_jump_addr
@@ -64,6 +66,14 @@ dtrace_invop_calltrap_addr:
 	.text
 #ifdef HWPMC_HOOKS
 	ENTRY(start_exceptions)
+#endif
+
+#if 1
+.global SVAsyscall
+.type SVAsyscall, @function
+
+.global SVAsysret
+.type SVAsysret, @function
 #endif
 
 /*****************************************************************************/
@@ -226,6 +236,7 @@ alltraps_pushregs_no_rdi:
 calltrap:
 	movq	%rsp,%rdi
 	call	trap
+	RETTARGET
 	MEXITCOUNT
 	jmp	doreti			/* Handle any pending ASTs */
 
@@ -282,6 +293,7 @@ IDTVEC(dblfault)
 1:
 	movq	%rsp,%rdi
 	call	dblfault_handler
+	RETTARGET
 2:
 	hlt
 	jmp	2b
@@ -344,6 +356,14 @@ IDTVEC(prot)
  * entries from an LDT).
  */
 IDTVEC(fast_syscall)
+#if 1
+  /*
+   * Determine if this is an SVA system call or an original system call.  If
+   * it is an SVA system call (the upper bit in the system call number is set),
+   * let SVA handle it.
+   */
+  jmp SVAsyscall
+#endif
 	swapgs
 	movq	%rsp,PCPU(SCRATCH_RSP)
 	movq	PCPU(RSP0),%rsp
@@ -385,6 +405,7 @@ IDTVEC(fast_syscall)
 	movl	TF_RFLAGS(%rsp),%esi
 	andl	$PSL_T,%esi
 	call	amd64_syscall
+	RETTARGET
 1:	movq	PCPU(CURPCB),%rax
 	/* Disable interrupts before testing PCB_FULL_IRET. */
 	cli
@@ -396,12 +417,18 @@ IDTVEC(fast_syscall)
 	jne	2f
 	/* Restore preserved registers. */
 	MEXITCOUNT
+#if 1
 	movq	TF_RDI(%rsp),%rdi	/* bonus; preserve arg 1 */
 	movq	TF_RSI(%rsp),%rsi	/* bonus: preserve arg 2 */
 	movq	TF_RDX(%rsp),%rdx	/* return value 2 */
 	movq	TF_RAX(%rsp),%rax	/* return value 1 */
 	movq	TF_RFLAGS(%rsp),%r11	/* original %rflags */
+#endif
 	movq	TF_RIP(%rsp),%rcx	/* original %rip */
+#if 0
+	call SVAsysret
+	RETTARGET
+#endif
 	movq	TF_RSP(%rsp),%rsp	/* user stack pointer */
 	swapgs
 	sysretq
@@ -410,6 +437,7 @@ IDTVEC(fast_syscall)
 	sti
 	movq	%rsp,%rdi
 	call	ast
+	RETTARGET
 	jmp	1b
 
 3:	/* Requested full context restore, use doreti for that. */
@@ -499,6 +527,7 @@ nmi_calltrap:
 	FAKE_MCOUNT(TF_RIP(%rsp))
 	movq	%rsp,%rdi
 	call	trap
+	RETTARGET
 	MEXITCOUNT
 #ifdef HWPMC_HOOKS
 	/*
@@ -561,7 +590,8 @@ outofnmi:
 	movq	$PMC_FN_USER_CALLCHAIN,%rsi	/* command */
 	movq	%rsp,%rdx			/* frame */
 	sti
-	call	*%rax
+	CALLQ(*%rax)
+	RETTARGET
 	cli
 nocallchain:
 #endif
@@ -600,6 +630,7 @@ ENTRY(fork_trampoline)
 	movq	%rbx,%rsi		/* arg1 */
 	movq	%rsp,%rdx		/* trapframe pointer */
 	call	fork_exit
+	RETTARGET
 	MEXITCOUNT
 	jmp	doreti			/* Handle any ASTs */
 
@@ -671,6 +702,7 @@ doreti_ast:
 	sti
 	movq	%rsp,%rdi	/* pass a pointer to the trapframe */
 	call	ast
+	RETTARGET
 	jmp	doreti_ast
 
 	/*
@@ -817,46 +849,56 @@ doreti_iret_fault:
 	ALIGN_TEXT
 	.globl	ds_load_fault
 ds_load_fault:
+	STARTFUNC
 	movl	$T_PROTFLT,TF_TRAPNO(%rsp)
 	movq	%rsp,%rdi
 	call	trap
+	RETTARGET
 	movw	$KUDSEL,TF_DS(%rsp)
 	jmp	doreti
 
 	ALIGN_TEXT
 	.globl	es_load_fault
 es_load_fault:
+	STARTFUNC
 	movl	$T_PROTFLT,TF_TRAPNO(%rsp)
 	movq	%rsp,%rdi
 	call	trap
+	RETTARGET
 	movw	$KUDSEL,TF_ES(%rsp)
 	jmp	doreti
 
 	ALIGN_TEXT
 	.globl	fs_load_fault
 fs_load_fault:
+	STARTFUNC
 	movl	$T_PROTFLT,TF_TRAPNO(%rsp)
 	movq	%rsp,%rdi
 	call	trap
+	RETTARGET
 	movw	$KUF32SEL,TF_FS(%rsp)
 	jmp	doreti
 
 	ALIGN_TEXT
 	.globl	gs_load_fault
 gs_load_fault:
+	STARTFUNC
 	popfq
 	movl	$T_PROTFLT,TF_TRAPNO(%rsp)
 	movq	%rsp,%rdi
 	call	trap
+	RETTARGET
 	movw	$KUG32SEL,TF_GS(%rsp)
 	jmp	doreti
 
 	ALIGN_TEXT
 	.globl	fsbase_load_fault
 fsbase_load_fault:
+	STARTFUNC
 	movl	$T_PROTFLT,TF_TRAPNO(%rsp)
 	movq	%rsp,%rdi
 	call	trap
+	RETTARGET
 	movq	PCPU(CURTHREAD),%r8
 	movq	TD_PCB(%r8),%r8
 	movq	$0,PCB_FSBASE(%r8)
@@ -865,9 +907,11 @@ fsbase_load_fault:
 	ALIGN_TEXT
 	.globl	gsbase_load_fault
 gsbase_load_fault:
+	STARTFUNC
 	movl	$T_PROTFLT,TF_TRAPNO(%rsp)
 	movq	%rsp,%rdi
 	call	trap
+	RETTARGET
 	movq	PCPU(CURTHREAD),%r8
 	movq	TD_PCB(%r8),%r8
 	movq	$0,PCB_GSBASE(%r8)

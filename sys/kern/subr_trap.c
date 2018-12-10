@@ -123,11 +123,20 @@ userret(struct thread *td, struct trapframe *frame)
 	if (td->td_pflags & TDP_GEOM)
 		g_waitidle();
 
+#if 0
 	/*
 	 * Charge system time if profiling.
 	 */
 	if (p->p_flag & P_PROFIL)
 		addupc_task(td, TRAPF_PC(frame), td->td_pticks * psratio);
+#else
+  /*
+   * SVA: We don't do time profiling, and that is the only use of the frame
+   * in this function
+   */
+	if (p->p_flag & P_PROFIL)
+    panic ("SVA: userret: SVA does not support profiling!\n");
+#endif
 	/*
 	 * Let the scheduler adjust our priority etc.
 	 */
@@ -158,6 +167,14 @@ ast(struct trapframe *framep)
 	struct proc *p;
 	int flags;
 	int sig;
+
+#if 1
+  /*
+   * SVA: Re-enable interrupts since the assembly dispatch code does not do
+   * this anymore for us.
+   */
+  enable_intr();
+#endif
 
 	td = curthread;
 	p = td->td_proc;

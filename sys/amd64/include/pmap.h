@@ -115,7 +115,7 @@
 
 /* Initial number of kernel page tables. */
 #ifndef NKPT
-#define	NKPT		32
+#define	NKPT		256	
 #endif
 
 #define NKPML4E		1		/* number of kernel PML4 slots */
@@ -221,8 +221,7 @@ pte_load_store(pt_entry_t *ptep, pt_entry_t pte)
 static __inline void
 pte_store(pt_entry_t *ptep, pt_entry_t pte)
 {
-
-	*ptep = pte;
+    *ptep = pte;
 }
 
 #define	pte_clear(ptep)		pte_store((ptep), (pt_entry_t)0ULL)

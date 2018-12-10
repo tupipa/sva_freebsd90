@@ -123,6 +123,9 @@ extern void syscall(struct trapframe *frame);
 void dblfault_handler(struct trapframe *frame);
 
 static int trap_pfault(struct trapframe *, int);
+#if 1
+static int trap_pfault_sva (register_t eva, unsigned long code, int usermode, struct trapframe * frame);
+#endif
 static void trap_fatal(struct trapframe *, vm_offset_t);
 
 #define MAX_TRAP_MSG		33
@@ -212,6 +215,10 @@ trap(struct trapframe *frame)
 	}
 #endif
 
+#if 1
+  if ((type != T_BPTFLT) && (type != T_NMI))
+    panic ("SVA: trap: %lx: %d\n", frame->tf_rip, type);
+#endif
 	if (type == T_RESERVED) {
 		trap_fatal(frame, 0);
 		goto out;
@@ -639,6 +646,586 @@ out:
 	return;
 }
 
+#if 1
+void fr_sva_trap(unsigned trapno, void * trapAddr);
+void
+fr_sva_trap(unsigned trapno, void * trapAddr)
+{
+	struct thread *td = curthread;
+	struct proc *p = td->td_proc;
+	int i = 0, ucode = 0, code;
+	u_int type;
+	register_t addr = 0;
+	ksiginfo_t ksi;
+#if 1
+	struct trapframe localframe;
+	struct trapframe * frame = &localframe;
+
+  /*
+   * Enable interrupts.
+   */
+  enable_intr();
+
+	/*
+	 * Convert the SVA interrupt context to a FreeBSD trapframe.
+	 */
+	extern void sva_trapframe (struct trapframe * tf);
+	sva_trapframe (frame);
+  localframe.tf_addr = trapAddr;
+  type = localframe.tf_trapno;
+
+  /*
+   * Translate the SVA trap number into a FreeBSD trap number.
+   */
+  switch (type) {
+    case IDT_DE:
+      type = T_DIVIDE;
+      break;
+
+    case IDT_DB:
+      type = T_RESERVED;
+      break;
+
+    case IDT_NMI:
+      type = T_NMI;
+      break;
+
+    case IDT_BP:
+      type = T_BPTFLT;
+      break;
+
+    case IDT_OF:
+      type = T_OFLOW;
+      break;
+
+    case IDT_BR:
+      type = T_BOUND;
+      break;
+
+    case IDT_UD:
+      type = T_PRIVINFLT;
+      break;
+
+    case IDT_NM:
+      type = T_DNA;
+      break;
+
+    case IDT_FPUGP:
+      type = T_FPOPFLT;
+      break;
+
+    case IDT_TS:
+      type = T_TSSFLT;
+      break;
+
+    case IDT_NP:
+      type = T_SEGNPFLT;
+      break;
+
+    case IDT_SS:
+      type = T_STKFLT;
+      break;
+
+    case IDT_AC:
+      type = T_ALIGNFLT;
+      break;
+
+    case IDT_MC:
+      type = T_MCHK;
+      break;
+
+    case IDT_XF:
+      type = T_XMMFLT;
+      break;
+
+    case IDT_PF:
+      type = T_PAGEFLT;
+      break;
+
+    case IDT_GP:
+      type = T_PROTFLT;
+      break;
+
+    default:
+      panic ("SVA: fr_sva_trap: Did not translate trap type: %x!\n", type);
+      break;
+  }
+#endif
+
+	PCPU_INC(cnt.v_trap);
+#if 0
+	type = frame->tf_trapno;
+#endif
+
+#ifdef SMP
+	/* Handler for NMI IPIs used for stopping CPUs. */
+	if (type == T_NMI) {
+	         if (ipi_nmi_handler() == 0)
+	                   goto out;
+	}
+#endif /* SMP */
+
+#ifdef KDB
+	if (kdb_active) {
+		kdb_reenter();
+		goto out;
+	}
+#endif
+
+	if (type == T_RESERVED) {
+		trap_fatal(frame, 0);
+		goto out;
+	}
+
+#ifdef	HWPMC_HOOKS
+	/*
+	 * CPU PMCs interrupt using an NMI.  If the PMC module is
+	 * active, pass the 'rip' value to the PMC module's interrupt
+	 * handler.  A return value of '1' from the handler means that
+	 * the NMI was handled by it and we can return immediately.
+	 */
+	if (type == T_NMI && pmc_intr &&
+	    (*pmc_intr)(PCPU_GET(cpuid), frame))
+		goto out;
+#endif
+
+	if (type == T_MCHK) {
+		if (!mca_intr())
+			trap_fatal(frame, 0);
+		goto out;
+	}
+
+#ifdef KDTRACE_HOOKS
+	/*
+	 * A trap can occur while DTrace executes a probe. Before
+	 * executing the probe, DTrace blocks re-scheduling and sets
+	 * a flag in it's per-cpu flags to indicate that it doesn't
+	 * want to fault. On returning from the probe, the no-fault
+	 * flag is cleared and finally re-scheduling is enabled.
+	 *
+	 * If the DTrace kernel module has registered a trap handler,
+	 * call it and if it returns non-zero, assume that it has
+	 * handled the trap and modified the trap frame so that this
+	 * function can return normally.
+	 */
+	if (type == T_DTRACE_PROBE || type == T_DTRACE_RET ||
+	    type == T_BPTFLT) {
+		struct reg regs;
+
+		fill_frame_regs(frame, &regs);
+		if (type == T_DTRACE_PROBE &&
+		    dtrace_fasttrap_probe_ptr != NULL &&
+		    dtrace_fasttrap_probe_ptr(&regs) == 0)
+			goto out;
+		else if (type == T_BPTFLT &&
+		    dtrace_pid_probe_ptr != NULL &&
+		    dtrace_pid_probe_ptr(&regs) == 0)
+			goto out;
+		else if (type == T_DTRACE_RET &&
+		    dtrace_return_probe_ptr != NULL &&
+		    dtrace_return_probe_ptr(&regs) == 0)
+			goto out;
+	}
+	if (dtrace_trap_func != NULL && (*dtrace_trap_func)(frame, type))
+		goto out;
+#endif
+
+	if ((frame->tf_rflags & PSL_I) == 0) {
+		/*
+		 * Buggy application or kernel code has disabled
+		 * interrupts and then trapped.  Enabling interrupts
+		 * now is wrong, but it is better than running with
+		 * interrupts disabled until they are accidentally
+		 * enabled later.
+		 */
+		if (ISPL(frame->tf_cs) == SEL_UPL)
+#if 1
+			uprintf(
+			    "pid %ld (%s): trap %d with interrupts disabled\n",
+			    (long)curproc->p_pid, curthread->td_name, type);
+#else
+      ;
+#endif
+		else if (type != T_NMI && type != T_BPTFLT &&
+		    type != T_TRCTRAP) {
+			/*
+			 * XXX not quite right, since this may be for a
+			 * multiple fault in user mode.
+			 */
+#if 1
+			printf("kernel trap %d with interrupts disabled\n",
+			    type);
+#endif
+
+			/*
+			 * We shouldn't enable interrupts while holding a
+			 * spin lock.
+			 */
+			if (td->td_md.md_spinlock_count == 0)
+				enable_intr();
+		}
+	}
+
+	code = frame->tf_err;
+	if (type == T_PAGEFLT) {
+		/*
+		 * If we get a page fault while in a critical section, then
+		 * it is most likely a fatal kernel page fault.  The kernel
+		 * is already going to panic trying to get a sleep lock to
+		 * do the VM lookup, so just consider it a fatal trap so the
+		 * kernel can print out a useful trap message and even get
+		 * to the debugger.
+		 *
+		 * If we get a page fault while holding a non-sleepable
+		 * lock, then it is most likely a fatal kernel page fault.
+		 * If WITNESS is enabled, then it's going to whine about
+		 * bogus LORs with various VM locks, so just skip to the
+		 * fatal trap handling directly.
+		 */
+		if (td->td_critnest != 0 ||
+		    WITNESS_CHECK(WARN_SLEEPOK | WARN_GIANTOK, NULL,
+		    "Kernel page fault") != 0)
+			trap_fatal(frame, frame->tf_addr);
+	}
+
+        if (ISPL(frame->tf_cs) == SEL_UPL) {
+		/* user trap */
+
+		td->td_pticks = 0;
+		td->td_frame = frame;
+		addr = frame->tf_rip;
+		if (td->td_ucred != p->p_ucred) 
+			cred_update_thread(td);
+
+		switch (type) {
+		case T_PRIVINFLT:	/* privileged instruction fault */
+			i = SIGILL;
+			ucode = ILL_PRVOPC;
+			break;
+
+		case T_BPTFLT:		/* bpt instruction fault */
+		case T_TRCTRAP:		/* trace trap */
+			enable_intr();
+			frame->tf_rflags &= ~PSL_T;
+			i = SIGTRAP;
+			ucode = (type == T_TRCTRAP ? TRAP_TRACE : TRAP_BRKPT);
+			break;
+
+		case T_ARITHTRAP:	/* arithmetic trap */
+			ucode = fputrap();
+			if (ucode == -1)
+				goto userout;
+			i = SIGFPE;
+			break;
+
+		case T_PROTFLT:		/* general protection fault */
+			i = SIGBUS;
+			ucode = BUS_OBJERR;
+			break;
+		case T_STKFLT:		/* stack fault */
+		case T_SEGNPFLT:	/* segment not present fault */
+			i = SIGBUS;
+			ucode = BUS_ADRERR;
+			break;
+		case T_TSSFLT:		/* invalid TSS fault */
+			i = SIGBUS;
+			ucode = BUS_OBJERR;
+			break;
+		case T_DOUBLEFLT:	/* double fault */
+		default:
+			i = SIGBUS;
+			ucode = BUS_OBJERR;
+			break;
+
+		case T_PAGEFLT:		/* page fault */
+			addr = frame->tf_addr;
+#if 0
+			i = trap_pfault(frame, TRUE);
+#else
+			i = trap_pfault_sva(addr, frame->tf_err, TRUE, frame);
+#endif
+			if (i == -1)
+				goto userout;
+			if (i == 0)
+				goto user;
+
+			if (i == SIGSEGV)
+				ucode = SEGV_MAPERR;
+			else {
+				if (prot_fault_translation == 0) {
+					/*
+					 * Autodetect.
+					 * This check also covers the images
+					 * without the ABI-tag ELF note.
+					 */
+					if (SV_CURPROC_ABI() == SV_ABI_FREEBSD
+					    && p->p_osrel >= P_OSREL_SIGSEGV) {
+						i = SIGSEGV;
+						ucode = SEGV_ACCERR;
+					} else {
+						i = SIGBUS;
+						ucode = BUS_PAGE_FAULT;
+					}
+				} else if (prot_fault_translation == 1) {
+					/*
+					 * Always compat mode.
+					 */
+					i = SIGBUS;
+					ucode = BUS_PAGE_FAULT;
+				} else {
+					/*
+					 * Always SIGSEGV mode.
+					 */
+					i = SIGSEGV;
+					ucode = SEGV_ACCERR;
+				}
+			}
+			break;
+
+		case T_DIVIDE:		/* integer divide fault */
+			ucode = FPE_INTDIV;
+			i = SIGFPE;
+			break;
+
+#ifdef DEV_ISA
+		case T_NMI:
+			/* machine/parity/power fail/"kitchen sink" faults */
+			if (isa_nmi(code) == 0) {
+#ifdef KDB
+				/*
+				 * NMI can be hooked up to a pushbutton
+				 * for debugging.
+				 */
+				if (kdb_on_nmi) {
+					printf ("NMI ... going to debugger\n");
+					kdb_trap(type, 0, frame);
+				}
+#endif /* KDB */
+				goto userout;
+			} else if (panic_on_nmi)
+				panic("NMI indicates hardware failure");
+			break;
+#endif /* DEV_ISA */
+
+		case T_OFLOW:		/* integer overflow fault */
+			ucode = FPE_INTOVF;
+			i = SIGFPE;
+			break;
+
+		case T_BOUND:		/* bounds check fault */
+			ucode = FPE_FLTSUB;
+			i = SIGFPE;
+			break;
+
+		case T_DNA:
+			/* transparent fault (due to context switch "late") */
+			KASSERT(PCB_USER_FPU(td->td_pcb),
+			    ("kernel FPU ctx has leaked"));
+#if 1
+      sva_print_icontext("FPU");
+      panic ("SVA: No FPU support yet!\n");
+#endif
+			fpudna();
+			goto userout;
+
+		case T_FPOPFLT:		/* FPU operand fetch fault */
+			ucode = ILL_COPROC;
+			i = SIGILL;
+			break;
+
+		case T_XMMFLT:		/* SIMD floating-point exception */
+			ucode = 0; /* XXX */
+			i = SIGFPE;
+			break;
+		}
+	} else {
+		/* kernel trap */
+
+		KASSERT(cold || td->td_ucred != NULL,
+		    ("kernel trap doesn't have ucred"));
+		switch (type) {
+		case T_PAGEFLT:			/* page fault */
+#if 0
+			(void) trap_pfault(frame, FALSE);
+#else
+			(void) trap_pfault_sva(frame->tf_addr, frame->tf_err, FALSE, frame);
+#endif
+			goto out;
+
+		case T_DNA:
+			KASSERT(!PCB_USER_FPU(td->td_pcb),
+			    ("Unregistered use of FPU in kernel"));
+			fpudna();
+			goto out;
+
+		case T_ARITHTRAP:	/* arithmetic trap */
+		case T_XMMFLT:		/* SIMD floating-point exception */
+		case T_FPOPFLT:		/* FPU operand fetch fault */
+			/*
+			 * XXXKIB for now disable any FPU traps in kernel
+			 * handler registration seems to be overkill
+			 */
+			trap_fatal(frame, 0);
+			goto out;
+
+		case T_STKFLT:		/* stack fault */
+			break;
+
+		case T_PROTFLT:		/* general protection fault */
+		case T_SEGNPFLT:	/* segment not present fault */
+			if (td->td_intr_nesting_level != 0)
+				break;
+
+			/*
+			 * Invalid segment selectors and out of bounds
+			 * %rip's and %rsp's can be set up in user mode.
+			 * This causes a fault in kernel mode when the
+			 * kernel tries to return to user mode.  We want
+			 * to get this fault so that we can fix the
+			 * problem here and not have to check all the
+			 * selectors and pointers when the user changes
+			 * them.
+			 */
+			if (frame->tf_rip == (long)doreti_iret) {
+				frame->tf_rip = (long)doreti_iret_fault;
+				goto out;
+			}
+			if (frame->tf_rip == (long)ld_ds) {
+				frame->tf_rip = (long)ds_load_fault;
+				goto out;
+			}
+			if (frame->tf_rip == (long)ld_es) {
+				frame->tf_rip = (long)es_load_fault;
+				goto out;
+			}
+			if (frame->tf_rip == (long)ld_fs) {
+				frame->tf_rip = (long)fs_load_fault;
+				goto out;
+			}
+			if (frame->tf_rip == (long)ld_gs) {
+				frame->tf_rip = (long)gs_load_fault;
+				goto out;
+			}
+			if (frame->tf_rip == (long)ld_gsbase) {
+				frame->tf_rip = (long)gsbase_load_fault;
+				goto out;
+			}
+			if (frame->tf_rip == (long)ld_fsbase) {
+				frame->tf_rip = (long)fsbase_load_fault;
+				goto out;
+			}
+			if (PCPU_GET(curpcb)->pcb_onfault != NULL) {
+				frame->tf_rip =
+				    (long)PCPU_GET(curpcb)->pcb_onfault;
+				goto out;
+			}
+			break;
+
+		case T_TSSFLT:
+			/*
+			 * PSL_NT can be set in user mode and isn't cleared
+			 * automatically when the kernel is entered.  This
+			 * causes a TSS fault when the kernel attempts to
+			 * `iret' because the TSS link is uninitialized.  We
+			 * want to get this fault so that we can fix the
+			 * problem here and not every time the kernel is
+			 * entered.
+			 */
+			if (frame->tf_rflags & PSL_NT) {
+				frame->tf_rflags &= ~PSL_NT;
+				goto out;
+			}
+			break;
+
+		case T_TRCTRAP:	 /* trace trap */
+			/*
+			 * Ignore debug register trace traps due to
+			 * accesses in the user's address space, which
+			 * can happen under several conditions such as
+			 * if a user sets a watchpoint on a buffer and
+			 * then passes that buffer to a system call.
+			 * We still want to get TRCTRAPS for addresses
+			 * in kernel space because that is useful when
+			 * debugging the kernel.
+			 */
+			if (user_dbreg_trap()) {
+				/*
+				 * Reset breakpoint bits because the
+				 * processor doesn't
+				 */
+				/* XXX check upper bits here */
+				load_dr6(rdr6() & 0xfffffff0);
+				goto out;
+			}
+			/*
+			 * FALLTHROUGH (TRCTRAP kernel mode, kernel address)
+			 */
+		case T_BPTFLT:
+			/*
+			 * If KDB is enabled, let it handle the debugger trap.
+			 * Otherwise, debugger traps "can't happen".
+			 */
+#ifdef KDB
+			if (kdb_trap(type, 0, frame))
+				goto out;
+#endif
+			break;
+
+#ifdef DEV_ISA
+		case T_NMI:
+			/* machine/parity/power fail/"kitchen sink" faults */
+			if (isa_nmi(code) == 0) {
+#ifdef KDB
+				/*
+				 * NMI can be hooked up to a pushbutton
+				 * for debugging.
+				 */
+				if (kdb_on_nmi) {
+					printf ("NMI ... going to debugger\n");
+					kdb_trap(type, 0, frame);
+				}
+#endif /* KDB */
+				goto out;
+			} else if (panic_on_nmi == 0)
+				goto out;
+			/* FALLTHROUGH */
+#endif /* DEV_ISA */
+		}
+
+		trap_fatal(frame, 0);
+		goto out;
+	}
+
+	/* Translate fault for emulators (e.g. Linux) */
+	if (*p->p_sysent->sv_transtrap)
+		i = (*p->p_sysent->sv_transtrap)(i, type);
+
+	ksiginfo_init_trap(&ksi);
+	ksi.ksi_signo = i;
+	ksi.ksi_code = ucode;
+	ksi.ksi_trapno = type;
+	ksi.ksi_addr = (void *)addr;
+	trapsignal(td, &ksi);
+
+user:
+	userret(td, frame);
+	mtx_assert(&Giant, MA_NOTOWNED);
+	KASSERT(PCB_USER_FPU(td->td_pcb),
+	    ("Return from trap with kernel FPU ctx leaked"));
+userout:
+out:
+#if 1
+  /*
+   * Run asynchronous stuff.
+   */
+  if (!(sva_was_privileged()))
+    if (curthread->td_flags & (TDF_ASTPENDING | TDF_NEEDRESCHED))
+      ast (frame);
+#endif
+	return;
+}
+#endif
+
 static int
 trap_pfault(frame, usermode)
 	struct trapframe *frame;
@@ -738,6 +1325,146 @@ nogo:
 
 	return((rv == KERN_PROTECTION_FAILURE) ? SIGBUS : SIGSEGV);
 }
+
+#if 1
+/*
+ * Function: trap_pfault_sva()
+ *
+ * Descrption:
+ *  This is a replacement for trap_pfault() that uses SVA intrinsics.
+ *
+ * Inputs:
+ *	eva      : The effective virtual address responsible for the page fault.
+ *	code     : The amd64 error code providing information about the fault.
+ *	usermode : A flag indicating whether the fault occured in user mode.
+ *	frame    : A fake trapframe used solely for trap_fatal() calls.
+ */
+static int
+trap_pfault_sva (register_t eva, unsigned long code, int usermode, struct trapframe * frame)
+{
+	vm_offset_t va;
+	struct vmspace *vm = NULL;
+	vm_map_t map;
+	int rv = 0;
+	vm_prot_t ftype;
+	struct thread *td = curthread;
+	struct proc *p = td->td_proc;
+
+	va = trunc_page(eva);
+#if 1
+  /*
+   * If the fault is for a ghost memory address, let the SVA VM take care of
+   * it.
+   */
+  if ((0xffffff0000000000u <= va) && (va < 0xffffff8000000000u)) {
+    extern void sva_ghost_fault (uintptr_t);
+    sva_ghost_fault(va);
+    return 0;
+  }
+#endif
+	if (va >= VM_MIN_KERNEL_ADDRESS) {
+		/*
+		 * Don't allow user-mode faults in kernel address space.
+		 */
+		if (usermode)
+			goto nogo;
+
+		map = kernel_map;
+	} else {
+		/*
+		 * This is a fault on non-kernel virtual memory.
+		 * vm is initialized above to NULL. If curproc is NULL
+		 * or curproc->p_vmspace is NULL the fault is fatal.
+		 */
+		if (p != NULL)
+			vm = p->p_vmspace;
+
+		if (vm == NULL)
+			goto nogo;
+
+		map = &vm->vm_map;
+
+		/*
+		 * When accessing a usermode address, kernel must be
+		 * ready to accept the page fault, and provide a
+		 * handling routine.  Since accessing the address
+		 * without the handler is a bug, do not try to handle
+		 * it normally, and panic immediately.
+		 */
+		if (!usermode && (td->td_intr_nesting_level != 0 ||
+		    PCPU_GET(curpcb)->pcb_onfault == NULL)) {
+			trap_fatal(frame, eva);
+			return (-1);
+		}
+	}
+
+	/*
+	 * PGEX_I is defined only if the execute disable bit capability is
+	 * supported and enabled.
+	 */
+#if 0
+	if (frame->tf_err & PGEX_W)
+		ftype = VM_PROT_WRITE;
+	else if ((frame->tf_err & PGEX_I) && pg_nx != 0)
+		ftype = VM_PROT_EXECUTE;
+	else
+		ftype = VM_PROT_READ;
+#else
+	if (code & PGEX_W)
+		ftype = VM_PROT_WRITE;
+	else if ((code & PGEX_I) && pg_nx != 0)
+		ftype = VM_PROT_EXECUTE;
+	else
+		ftype = VM_PROT_READ;
+#endif
+
+	if (map != kernel_map) {
+		/*
+		 * Keep swapout from messing with us during this
+		 *	critical time.
+		 */
+		PROC_LOCK(p);
+		++p->p_lock;
+		PROC_UNLOCK(p);
+
+		/* Fault in the user page: */
+		rv = vm_fault(map, va, ftype, VM_FAULT_NORMAL);
+
+		PROC_LOCK(p);
+		--p->p_lock;
+		PROC_UNLOCK(p);
+	} else {
+		/*
+		 * Don't have to worry about process locking or stacks in the
+		 * kernel.
+		 */
+		rv = vm_fault(map, va, ftype, VM_FAULT_NORMAL);
+	}
+	if (rv == KERN_SUCCESS)
+		return (0);
+nogo:
+	if (!usermode) {
+		if (td->td_intr_nesting_level == 0 &&
+		    PCPU_GET(curpcb)->pcb_onfault != NULL) {
+#if 0
+			frame->tf_rip = (long)PCPU_GET(curpcb)->pcb_onfault;
+#else
+      if (PCPU_GET(curpcb)->pcb_onfault == 1) {
+        sva_iunwind();
+      } else {
+        panic ("SVA: Attempt to set RIP in Interrupt Context!\n");
+      }
+#endif
+			return (0);
+		}
+		trap_fatal(frame, eva);
+		return (-1);
+	}
+
+	return((rv == KERN_PROTECTION_FAILURE) ? SIGBUS : SIGSEGV);
+}
+
+#endif
 
 static void
 trap_fatal(frame, eva)
@@ -911,6 +1638,12 @@ amd64_syscall(struct thread *td, int traced)
 	int error;
 	ksiginfo_t ksi;
 
+#if 1
+  /*
+   * SVA will not pass the thread pointer.
+   */
+  td = curthread;
+#endif
 #ifdef DIAGNOSTIC
 	if (ISPL(td->td_frame->tf_cs) != SEL_UPL) {
 		panic("syscall");
@@ -940,3 +1673,81 @@ amd64_syscall(struct thread *td, int traced)
 
 	syscallret(td, error, &sa);
 }
+
+#if 1
+/*
+ *	syscall -	system call request C handler
+ *
+ *	A system call is essentially treated as a trap.
+ */
+void
+sva_syscall(struct thread *td, int traced)
+{
+	struct syscall_args sa;
+	int error;
+	ksiginfo_t ksi;
+
+#if 1
+  /*
+   * Enable interrupts.
+   */
+  enable_intr();
+
+  /*
+   * SVA will not pass the thread pointer nor will it indicate whether tracing
+   * is enabled.
+   */
+  td = curthread;
+  traced = 0;
+
+  /*
+   * Install a trap frame into the thread structure.
+   */
+	struct trapframe localframe;
+  td->td_frame = &localframe;
+
+	/*
+	 * Convert the SVA interrupt context to a FreeBSD trapframe.
+	 */
+	extern void sva_syscall_trapframe (struct trapframe * tf);
+	sva_syscall_trapframe (&localframe);
+#if 0
+  traced = localframe.tf_rflags & PSL_T;
+#endif
+#endif
+#ifdef DIAGNOSTIC
+	if (ISPL(td->td_frame->tf_cs) != SEL_UPL) {
+		panic("syscall");
+		/* NOT REACHED */
+	}
+#endif
+	error = syscallenter(td, &sa);
+
+	/*
+	 * Traced syscall.
+	 */
+	if (__predict_false(traced)) {
+		td->td_frame->tf_rflags &= ~PSL_T;
+		ksiginfo_init_trap(&ksi);
+		ksi.ksi_signo = SIGTRAP;
+		ksi.ksi_code = TRAP_TRACE;
+		ksi.ksi_addr = (void *)td->td_frame->tf_rip;
+		trapsignal(td, &ksi);
+	}
+
+	KASSERT(PCB_USER_FPU(td->td_pcb),
+	    ("System call %s returing with kernel FPU ctx leaked",
+	     syscallname(td->td_proc, sa.code)));
+	KASSERT(td->td_pcb->pcb_save == &td->td_pcb->pcb_user_save,
+	    ("System call %s returning with mangled pcb_save",
+	     syscallname(td->td_proc, sa.code)));
+
+	syscallret(td, error, &sa);
+
+#if 1
+  /* SVA: The SVA assembly code does not run the AST */
+  if (curthread->td_flags & (TDF_ASTPENDING | TDF_NEEDRESCHED))
+    ast (&localframe);
+#endif
+}
+#endif

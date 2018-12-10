@@ -65,6 +65,12 @@
 #include <sys/ucred.h>
 #include <machine/proc.h>		/* Machine-dependent proc substruct. */
 
+#if 1
+#ifdef _KERNEL
+#include <sva/state.h>
+#endif
+#endif
+
 /*
  * One structure allocated per session.
  *
@@ -309,6 +315,15 @@ struct thread {
 	struct vnet	*td_vnet;	/* (k) Effective vnet. */
 	const char	*td_vnet_lpush;	/* (k) Debugging vnet push / pop. */
 	struct trapframe *td_intr_frame;/* (k) Frame of the current irq */
+#if 1
+  /* The thread that swapped out so this thread could swap on */
+  struct thread * prev;
+  struct mtx * mtx;
+  uintptr_t svaID;   /* Thread ID for SVA Thread */
+  unsigned char sva; /* Flag whether SVA saved state on context switch */
+  void (*callout)(void *, struct trapframe *); /* Thread startup function */
+  void * callarg; /* Thread startup argument */
+#endif
 };
 
 struct mtx *thread_lock_block(struct thread *);

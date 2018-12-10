@@ -61,6 +61,10 @@ __FBSDID("$FreeBSD: release/9.0.0/sys/kern/subr_pcpu.c 224218 2011-07-19 14:57:5
 #include <sys/sx.h>
 #include <ddb/ddb.h>
 
+#if 1
+#include <sva/interrupt.h>
+#endif
+
 MALLOC_DEFINE(M_PCPU, "Per-cpu", "Per-cpu resource accouting.");
 
 struct dpcpu_free {
@@ -82,7 +86,6 @@ struct cpuhead cpuhead = STAILQ_HEAD_INITIALIZER(cpuhead);
 void
 pcpu_init(struct pcpu *pcpu, int cpuid, size_t size)
 {
-
 	bzero(pcpu, size);
 	KASSERT(cpuid >= 0 && cpuid < MAXCPU,
 	    ("pcpu_init: invalid cpuid %d", cpuid));

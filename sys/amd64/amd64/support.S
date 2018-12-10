@@ -38,6 +38,8 @@
 
 #include "assym.s"
 
+#include <sva/cfi.h>
+
 	.text
 
 /*
@@ -57,7 +59,7 @@ ENTRY(bzero)
 	andq	$7,%rcx
 	rep
 	stosb
-	ret
+	RETQ
 END(bzero)
 	
 /* Address: %rdi */
@@ -73,7 +75,7 @@ ENTRY(pagezero)
 	addq	$32,%rdx
 	jne	1b
 	sfence
-	ret
+	RETQ
 END(pagezero)
 
 ENTRY(bcmp)
@@ -91,7 +93,7 @@ ENTRY(bcmp)
 1:
 	setne	%al
 	movsbl	%al,%eax
-	ret
+	RETQ
 END(bcmp)
 
 /*
@@ -116,7 +118,8 @@ ENTRY(bcopy)
 	andq	$7,%rcx				/* any bytes left? */
 	rep
 	movsb
-	ret
+	RETQ
+	retq
 
 	/* ALIGN_TEXT */
 1:
@@ -135,7 +138,7 @@ ENTRY(bcopy)
 	rep
 	movsq
 	cld
-	ret
+	RETQ
 END(bcopy)
 	
 /*
@@ -151,7 +154,7 @@ ENTRY(memcpy)
 	andq	$7,%rcx				/* any bytes left? */
 	rep
 	movsb
-	ret
+	RETQ
 END(memcpy)
 
 /*
@@ -178,7 +181,7 @@ ENTRY(pagecopy)
 	addq	$32,%rdx
 	jne	2b
 	sfence
-	ret
+	RETQ
 END(pagecopy)
 
 /* fillw(pat, base, cnt) */  
@@ -190,7 +193,7 @@ ENTRY(fillw)
 	cld
 	rep
 	stosw
-	ret
+	RETQ
 END(fillw)
 
 /*****************************************************************************/
@@ -209,9 +212,13 @@ END(fillw)
  * copyout(from_kernel, to_user, len)  - MP SAFE
  *         %rdi,        %rsi,    %rdx
  */
-ENTRY(copyout)
+ENTRY(real_copyout)
 	movq	PCPU(CURPCB),%rax
+#if 0
 	movq	$copyout_fault,PCB_ONFAULT(%rax)
+#else
+	movq	$1,PCB_ONFAULT(%rax)
+#endif
 	testq	%rdx,%rdx			/* anything to do? */
 	jz	done_copyout
 
@@ -255,23 +262,27 @@ done_copyout:
 	xorl	%eax,%eax
 	movq	PCPU(CURPCB),%rdx
 	movq	%rax,PCB_ONFAULT(%rdx)
-	ret
+	RETQ
 
 	ALIGN_TEXT
 copyout_fault:
 	movq	PCPU(CURPCB),%rdx
 	movq	$0,PCB_ONFAULT(%rdx)
 	movq	$EFAULT,%rax
-	ret
-END(copyout)
+	RETQ
+END(real_copyout)
 
 /*
  * copyin(from_user, to_kernel, len) - MP SAFE
  *        %rdi,      %rsi,      %rdx
  */
-ENTRY(copyin)
+ENTRY(real_copyin)
 	movq	PCPU(CURPCB),%rax
+#if 0
 	movq	$copyin_fault,PCB_ONFAULT(%rax)
+#else
+	movq	$1,PCB_ONFAULT(%rax)
+#endif
 	testq	%rdx,%rdx			/* anything to do? */
 	jz	done_copyin
 
@@ -301,23 +312,27 @@ done_copyin:
 	xorl	%eax,%eax
 	movq	PCPU(CURPCB),%rdx
 	movq	%rax,PCB_ONFAULT(%rdx)
-	ret
+	RETQ
 
 	ALIGN_TEXT
 copyin_fault:
 	movq	PCPU(CURPCB),%rdx
 	movq	$0,PCB_ONFAULT(%rdx)
 	movq	$EFAULT,%rax
-	ret
-END(copyin)
+	RETQ
+END(real_copyin)
 
 /*
  * casuword32.  Compare and set user integer.  Returns -1 or the current value.
  *        dst = %rdi, old = %rsi, new = %rdx
  */
-ENTRY(casuword32)
+ENTRY(real_casuword32)
 	movq	PCPU(CURPCB),%rcx
+#if 0
 	movq	$fusufault,PCB_ONFAULT(%rcx)
+#else
+	movq	$1,PCB_ONFAULT(%rcx)
+#endif
 
 	movq	$VM_MAXUSER_ADDRESS-4,%rax
 	cmpq	%rax,%rdi			/* verify address is valid */
@@ -337,16 +352,20 @@ ENTRY(casuword32)
 
 	movq	PCPU(CURPCB),%rcx
 	movq	$0,PCB_ONFAULT(%rcx)
-	ret
-END(casuword32)
+	RETQ
+END(real_casuword32)
 
 /*
  * casuword.  Compare and set user word.  Returns -1 or the current value.
  *        dst = %rdi, old = %rsi, new = %rdx
  */
-ENTRY(casuword)
+ENTRY(real_casuword)
 	movq	PCPU(CURPCB),%rcx
+#if 0
 	movq	$fusufault,PCB_ONFAULT(%rcx)
+#else
+	movq	$1,PCB_ONFAULT(%rcx)
+#endif
 
 	movq	$VM_MAXUSER_ADDRESS-4,%rax
 	cmpq	%rax,%rdi			/* verify address is valid */
@@ -367,8 +386,8 @@ ENTRY(casuword)
 	movq	PCPU(CURPCB),%rcx
 	movq	$fusufault,PCB_ONFAULT(%rcx)
 	movq	$0,PCB_ONFAULT(%rcx)
-	ret
-END(casuword)
+	RETQ
+END(real_casuword)
 
 /*
  * Fetch (load) a 64-bit word, a 32-bit word, a 16-bit word, or an 8-bit
@@ -376,10 +395,14 @@ END(casuword)
  * addr = %rdi
  */
 
-ALTENTRY(fuword64)
-ENTRY(fuword)
+ALTENTRY(real_fuword64)
+ENTRY(real_fuword)
 	movq	PCPU(CURPCB),%rcx
+#if 0
 	movq	$fusufault,PCB_ONFAULT(%rcx)
+#else
+	movq	$1,PCB_ONFAULT(%rcx)
+#endif
 
 	movq	$VM_MAXUSER_ADDRESS-8,%rax
 	cmpq	%rax,%rdi			/* verify address is valid */
@@ -387,13 +410,17 @@ ENTRY(fuword)
 
 	movq	(%rdi),%rax
 	movq	$0,PCB_ONFAULT(%rcx)
-	ret
-END(fuword64)	
-END(fuword)
+	RETQ
+END(real_fuword64)	
+END(real_fuword)
 
-ENTRY(fuword32)
+ENTRY(real_fuword32)
 	movq	PCPU(CURPCB),%rcx
+#if 0
 	movq	$fusufault,PCB_ONFAULT(%rcx)
+#else
+	movq	$1,PCB_ONFAULT(%rcx)
+#endif
 
 	movq	$VM_MAXUSER_ADDRESS-4,%rax
 	cmpq	%rax,%rdi			/* verify address is valid */
@@ -401,8 +428,8 @@ ENTRY(fuword32)
 
 	movl	(%rdi),%eax
 	movq	$0,PCB_ONFAULT(%rcx)
-	ret
-END(fuword32)
+	RETQ
+END(real_fuword32)
 
 /*
  * fuswintr() and suswintr() are specialized variants of fuword16() and
@@ -414,13 +441,17 @@ END(fuword32)
 ALTENTRY(suswintr)
 ENTRY(fuswintr)
 	movq	$-1,%rax
-	ret
+	RETQ
 END(suswintr)
 END(fuswintr)
 
-ENTRY(fuword16)
+ENTRY(real_fuword16)
 	movq	PCPU(CURPCB),%rcx
+#if 0
 	movq	$fusufault,PCB_ONFAULT(%rcx)
+#else
+	movq	$1,PCB_ONFAULT(%rcx)
+#endif
 
 	movq	$VM_MAXUSER_ADDRESS-2,%rax
 	cmpq	%rax,%rdi
@@ -428,12 +459,16 @@ ENTRY(fuword16)
 
 	movzwl	(%rdi),%eax
 	movq	$0,PCB_ONFAULT(%rcx)
-	ret
-END(fuword16)
+	RETQ
+END(real_fuword16)
 
-ENTRY(fubyte)
+ENTRY(real_fubyte)
 	movq	PCPU(CURPCB),%rcx
+#if 0
 	movq	$fusufault,PCB_ONFAULT(%rcx)
+#else
+	movq	$1,PCB_ONFAULT(%rcx)
+#endif
 
 	movq	$VM_MAXUSER_ADDRESS-1,%rax
 	cmpq	%rax,%rdi
@@ -441,8 +476,8 @@ ENTRY(fubyte)
 
 	movzbl	(%rdi),%eax
 	movq	$0,PCB_ONFAULT(%rcx)
-	ret
-END(fubyte)
+	RETQ
+END(real_fubyte)
 
 	ALIGN_TEXT
 fusufault:
@@ -450,17 +485,21 @@ fusufault:
 	xorl	%eax,%eax
 	movq	%rax,PCB_ONFAULT(%rcx)
 	decq	%rax
-	ret
+	RETQ
 
 /*
  * Store a 64-bit word, a 32-bit word, a 16-bit word, or an 8-bit byte to
  * user memory.  All these functions are MPSAFE.
  * addr = %rdi, value = %rsi
  */
-ALTENTRY(suword64)
-ENTRY(suword)
+ALTENTRY(real_suword64)
+ENTRY(real_suword)
 	movq	PCPU(CURPCB),%rcx
+#if 0
 	movq	$fusufault,PCB_ONFAULT(%rcx)
+#else
+	movq	$1,PCB_ONFAULT(%rcx)
+#endif
 
 	movq	$VM_MAXUSER_ADDRESS-8,%rax
 	cmpq	%rax,%rdi			/* verify address validity */
@@ -470,13 +509,17 @@ ENTRY(suword)
 	xorl	%eax,%eax
 	movq	PCPU(CURPCB),%rcx
 	movq	%rax,PCB_ONFAULT(%rcx)
-	ret
-END(suword64)
-END(suword)
+	RETQ
+END(real_suword64)
+END(real_suword)
 
-ENTRY(suword32)
+ENTRY(real_suword32)
 	movq	PCPU(CURPCB),%rcx
+#if 0
 	movq	$fusufault,PCB_ONFAULT(%rcx)
+#else
+	movq	$1,PCB_ONFAULT(%rcx)
+#endif
 
 	movq	$VM_MAXUSER_ADDRESS-4,%rax
 	cmpq	%rax,%rdi			/* verify address validity */
@@ -486,12 +529,16 @@ ENTRY(suword32)
 	xorl	%eax,%eax
 	movq	PCPU(CURPCB),%rcx
 	movq	%rax,PCB_ONFAULT(%rcx)
-	ret
-END(suword32)
+	RETQ
+END(real_suword32)
 
-ENTRY(suword16)
+ENTRY(real_suword16)
 	movq	PCPU(CURPCB),%rcx
+#if 0
 	movq	$fusufault,PCB_ONFAULT(%rcx)
+#else
+	movq	$1,PCB_ONFAULT(%rcx)
+#endif
 
 	movq	$VM_MAXUSER_ADDRESS-2,%rax
 	cmpq	%rax,%rdi			/* verify address validity */
@@ -501,12 +548,16 @@ ENTRY(suword16)
 	xorl	%eax,%eax
 	movq	PCPU(CURPCB),%rcx		/* restore trashed register */
 	movq	%rax,PCB_ONFAULT(%rcx)
-	ret
-END(suword16)
+	RETQ
+END(real_suword16)
 
-ENTRY(subyte)
+ENTRY(real_subyte)
 	movq	PCPU(CURPCB),%rcx
+#if 0
 	movq	$fusufault,PCB_ONFAULT(%rcx)
+#else
+	movq	$1,PCB_ONFAULT(%rcx)
+#endif
 
 	movq	$VM_MAXUSER_ADDRESS-1,%rax
 	cmpq	%rax,%rdi			/* verify address validity */
@@ -517,8 +568,8 @@ ENTRY(subyte)
 	xorl	%eax,%eax
 	movq	PCPU(CURPCB),%rcx		/* restore trashed register */
 	movq	%rax,PCB_ONFAULT(%rcx)
-	ret
-END(subyte)
+	RETQ
+END(real_subyte)
 
 /*
  * copyinstr(from, to, maxlen, int *lencopied) - MP SAFE
@@ -529,6 +580,7 @@ END(subyte)
  *	EFAULT on protection violations. If lencopied is non-zero,
  *	return the actual length in *lencopied.
  */
+#if 0
 ENTRY(copyinstr)
 	movq	%rdx,%r8			/* %r8 = maxlen */
 	movq	%rcx,%r9			/* %r9 = *len */
@@ -586,8 +638,9 @@ cpystrflt_x:
 	subq	%rdx,%r8
 	movq	%r8,(%r9)
 1:
-	ret
+	RETQ
 END(copyinstr)
+#endif
 
 /*
  * copystr(from, to, maxlen, int *lencopied) - MP SAFE
@@ -623,7 +676,7 @@ ENTRY(copystr)
 	subq	%rdx,%r8
 	movq	%r8,(%rcx)
 7:
-	ret
+	RETQ
 END(copystr)
 
 /*
@@ -651,7 +704,11 @@ ENTRY(lgdt)
 	pushq	$KCSEL
 	pushq	%rax
 	MEXITCOUNT
+#if 1
 	lretq
+#else
+	RETQ
+#endif
 END(lgdt)
 
 /*****************************************************************************/
@@ -669,7 +726,7 @@ ENTRY(setjmp)
 	movq	0(%rsp),%rdx			/* get rta */
 	movq	%rdx,56(%rdi)			/* save rip */
 	xorl	%eax,%eax			/* return(0); */
-	ret
+	RETQ
 END(setjmp)
 
 ENTRY(longjmp)
@@ -684,7 +741,7 @@ ENTRY(longjmp)
 	movq	%rdx,0(%rsp)			/* put in return frame */
 	xorl	%eax,%eax			/* return(1); */
 	incl	%eax
-	ret
+	RETQ
 END(longjmp)
 
 /*
@@ -703,7 +760,7 @@ ENTRY(rdmsr_safe)
 	movq	%rax,(%rsi)
 	xorq	%rax,%rax
 	movq	%rax,PCB_ONFAULT(%r8)
-	ret
+	RETQ
 
 /*
  * Support for writing MSRs in the safe manner.
@@ -720,7 +777,7 @@ ENTRY(wrmsr_safe)
 				   hi byte in edx, lo in %eax. */
 	xorq	%rax,%rax
 	movq	%rax,PCB_ONFAULT(%r8)
-	ret
+	RETQ
 
 /*
  * MSR operations fault handler
@@ -729,4 +786,4 @@ ENTRY(wrmsr_safe)
 msr_onfault:
 	movq	$0,PCB_ONFAULT(%r8)
 	movl	$EFAULT,%eax
-	ret
+	RETQ

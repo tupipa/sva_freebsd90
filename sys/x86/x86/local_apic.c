@@ -133,6 +133,7 @@ static struct lvt lvts[LVT_MAX + 1] = {
 	{ 1, 1, 1, 1, APIC_LVT_DM_FIXED, APIC_CMC_INT },	/* CMCI */
 };
 
+#if 0
 static inthand_t *ioint_handlers[] = {
 	NULL,			/* 0 - 31 */
 	IDTVEC(apic_isr1),	/* 32 - 63 */
@@ -143,6 +144,26 @@ static inthand_t *ioint_handlers[] = {
 	IDTVEC(apic_isr6),	/* 192 - 223 */
 	IDTVEC(apic_isr7),	/* 224 - 255 */
 };
+#else
+void apic_isr_sva1 (unsigned int vector);
+void apic_isr_sva2 (unsigned int vector);
+void apic_isr_sva3 (unsigned int vector);
+void apic_isr_sva4 (unsigned int vector);
+void apic_isr_sva5 (unsigned int vector);
+void apic_isr_sva6 (unsigned int vector);
+void apic_isr_sva7 (unsigned int vector);
+static inthand_t *ioint_handlers[] = {
+	NULL,			/* 0 - 31 */
+	apic_isr_sva1,	/* 32 - 63 */
+	apic_isr_sva2,	/* 64 - 95 */
+	apic_isr_sva3,	/* 96 - 127 */
+	apic_isr_sva4,	/* 128 - 159 */
+	apic_isr_sva5,	/* 160 - 191 */
+	apic_isr_sva6,	/* 192 - 223 */
+	apic_isr_sva7,	/* 224 - 255 */
+};
+
+#endif
 
 
 static u_int32_t lapic_timer_divisors[] = {
@@ -225,8 +246,13 @@ lapic_init(vm_paddr_t addr)
 	    ("local APIC not aligned on a page boundary"));
 	lapic = pmap_mapdev(addr, sizeof(lapic_t));
 	lapic_paddr = addr;
+#if 0
 	setidt(APIC_SPURIOUS_INT, IDTVEC(spuriousint), SDT_APIC, SEL_KPL,
 	    GSEL_APIC);
+#else
+  extern void spurious_handler (unsigned intNum);
+	sva_register_interrupt(APIC_SPURIOUS_INT, spurious_handler);
+#endif
 
 	/* Perform basic initialization of the BSP's local APIC. */
 	lapic_enable();
@@ -234,16 +260,28 @@ lapic_init(vm_paddr_t addr)
 	/* Set BSP's per-CPU local APIC ID. */
 	PCPU_SET(apic_id, lapic_id());
 
+#if 0
 	/* Local APIC timer interrupt. */
 	setidt(APIC_TIMER_INT, IDTVEC(timerint), SDT_APIC, SEL_KPL, GSEL_APIC);
+#else
+	sva_register_interrupt(APIC_TIMER_INT, lapic_handle_timer);
+#endif
 
 	/* Local APIC error interrupt. */
+#if 0
 	setidt(APIC_ERROR_INT, IDTVEC(errorint), SDT_APIC, SEL_KPL, GSEL_APIC);
+#else
+	sva_register_interrupt(APIC_ERROR_INT, lapic_handle_error);
+#endif
 
 	/* XXX: Thermal interrupt */
 
 	/* Local APIC CMCI. */
+#if 0
 	setidt(APIC_CMC_INT, IDTVEC(cmcint), SDT_APICT, SEL_KPL, GSEL_APIC);
+#else
+	sva_register_interrupt(APIC_CMC_INT, lapic_handle_cmc);
+#endif
 
 	if ((resource_int_value("apic", 0, "clock", &i) != 0 || i != 0)) {
 		arat = 0;
@@ -780,12 +818,116 @@ lapic_handle_intr(int vector, struct trapframe *frame)
 	intr_execute_handlers(isrc, frame);
 }
 
+#if 1
+/* SVA: Create C versions of the apic_isr functions */
+void
+lapic_handle_intr_sva(int vector)
+{
+	struct intsrc *isrc;
+  struct trapframe frame;
+
+	extern void sva_trapframe (struct trapframe * tf);
+  sva_trapframe (&frame);
+	isrc = intr_lookup_source(apic_idt_to_irq(PCPU_GET(apic_id),
+	    vector));
+	intr_execute_handlers(isrc, &frame);
+#if 1
+  /*
+   * SVA: TODO: Enabling this causes a stack fault with interrupts disabled.
+   *
+   * Run asynchronous stuff.
+   */
+  if (!(sva_was_privileged()))
+    if (curthread->td_flags & (TDF_ASTPENDING | TDF_NEEDRESCHED))
+      ast (&frame);
+#endif
+}
+
+void
+apic_isr_sva1 (unsigned int vector) {
+  unsigned int offset;
+  __asm__ __volatile__ ("bsrl %1, %0\n" : "=r" (offset) : "m" (lapic->isr1));
+  if (offset) {
+    lapic_handle_intr_sva (offset+(32*1));
+  }
+}
+
+void
+apic_isr_sva2 (unsigned int vector) {
+  unsigned int offset;
+  __asm__ __volatile__ ("bsrl %1, %0\n" : "=r" (offset) : "m" (lapic->isr2));
+  if (offset) {
+    lapic_handle_intr_sva (offset+(32*2));
+  }
+}
+
+void
+apic_isr_sva3 (unsigned int vector) {
+  unsigned int offset;
+  __asm__ __volatile__ ("bsrl %1, %0\n" : "=r" (offset) : "m" (lapic->isr3));
+  if (offset) {
+    lapic_handle_intr_sva (offset+(32*3));
+  }
+}
+
+void
+apic_isr_sva4 (unsigned int vector) {
+  unsigned int offset;
+  __asm__ __volatile__ ("bsrl %1, %0\n" : "=r" (offset) : "m" (lapic->isr4));
+  if (offset) {
+    lapic_handle_intr_sva (offset+(32*4));
+  }
+}
+
+void
+apic_isr_sva5 (unsigned int vector) {
+  unsigned int offset;
+  __asm__ __volatile__ ("bsrl %1, %0\n" : "=r" (offset) : "m" (lapic->isr5));
+  if (offset) {
+    lapic_handle_intr_sva (offset+(32*5));
+  }
+}
+
+void
+apic_isr_sva6 (unsigned int vector) {
+  unsigned int offset;
+  __asm__ __volatile__ ("bsrl %1, %0\n" : "=r" (offset) : "m" (lapic->isr6));
+  if (offset) {
+    lapic_handle_intr_sva (offset+(32*6));
+  }
+}
+
+void
+apic_isr_sva7 (unsigned int vector) {
+  unsigned int offset;
+  __asm__ __volatile__ ("bsrl %1, %0\n" : "=r" (offset) : "m" (lapic->isr7));
+  if (offset) {
+    lapic_handle_intr_sva (offset+(32*7));
+  }
+}
+#endif
+
+#if 0
 void
 lapic_handle_timer(struct trapframe *frame)
+#else
+void
+lapic_handle_timer(int type)
+#endif
 {
 	struct lapic *la;
 	struct trapframe *oldframe;
 	struct thread *td;
+#if 1
+  struct trapframe newframe;
+  struct trapframe * frame = &newframe;
+
+	/*
+	 * Convert the SVA interrupt context to a FreeBSD trapframe.
+	 */
+	extern void sva_trapframe (struct trapframe * tf);
+	sva_trapframe (frame);
+#endif
 
 	/* Send EOI first thing. */
 	lapic_eoi();
@@ -802,8 +944,19 @@ lapic_handle_timer(struct trapframe *frame)
 	 * and unlike other schedulers it actually schedules threads to
 	 * those CPUs.
 	 */
+#if 0
 	if (CPU_ISSET(PCPU_GET(cpuid), &hlt_cpus_mask))
 		return;
+#else
+	if (CPU_ISSET(PCPU_GET(cpuid), &hlt_cpus_mask)) {
+		/*
+		 * Convert trap frame changes back into the SVA interrupt context.
+		 */
+    if (curthread->td_flags & (TDF_ASTPENDING | TDF_NEEDRESCHED))
+      ast (frame);
+		return;
+	}
+#endif
 #endif
 
 	/* Look up our local APIC structure for the tick counters. */
@@ -820,6 +973,11 @@ lapic_handle_timer(struct trapframe *frame)
 		td->td_intr_nesting_level--;
 	}
 	critical_exit();
+#if 1
+  if (!(sva_was_privileged()))
+    if (curthread->td_flags & (TDF_ASTPENDING | TDF_NEEDRESCHED))
+      ast (frame);
+#endif
 }
 
 static void
@@ -1028,8 +1186,12 @@ apic_enable_vector(u_int apic_id, u_int vector)
 	KASSERT(vector != IDT_DTRACE_RET,
 	    ("Attempt to overwrite DTrace entry"));
 #endif
+#if 0
 	setidt(vector, ioint_handlers[vector / 32], SDT_APIC, SEL_KPL,
 	    GSEL_APIC);
+#else
+	sva_register_interrupt(vector, ioint_handlers[vector / 32]);
+#endif
 }
 
 void

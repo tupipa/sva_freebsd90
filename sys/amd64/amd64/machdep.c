@@ -55,6 +55,7 @@ __FBSDID("$FreeBSD: release/9.0.0/sys/amd64/amd64/machdep.c 225617 2011-09-16 13
 #include "opt_perfmon.h"
 #include "opt_sched.h"
 #include "opt_kdtrace.h"
+#include "opt_sva_mmu.h"
 
 #include <sys/param.h>
 #include <sys/proc.h>
@@ -140,6 +141,14 @@ __FBSDID("$FreeBSD: release/9.0.0/sys/amd64/amd64/machdep.c 225617 2011-09-16 13
 
 #include <isa/isareg.h>
 #include <isa/rtc.h>
+
+#include <sva/init.h>
+#include <sva/state.h>
+
+#ifdef SVA_MMU
+#include <sva/mmu_intrinsics.h>
+#define SVA_DEBUG 0
+#endif
 
 /* Sanity check for __curthread() */
 CTASSERT(offsetof(struct pcpu, pc_curthread) == 0);
@@ -334,6 +343,7 @@ sendsig(sig_t catcher, ksiginfo_t *ksi, sigset_t *mask)
 	sf.sf_uc.uc_stack = td->td_sigstk;
 	sf.sf_uc.uc_stack.ss_flags = (td->td_pflags & TDP_ALTSTACK)
 	    ? ((oonstack) ? SS_ONSTACK : 0) : SS_DISABLE;
+#if 0
 	sf.sf_uc.uc_mcontext.mc_onstack = (oonstack) ? 1 : 0;
 	bcopy(regs, &sf.sf_uc.uc_mcontext.mc_rdi, sizeof(*regs));
 	sf.sf_uc.uc_mcontext.mc_len = sizeof(sf.sf_uc.uc_mcontext); /* magic */
@@ -344,10 +354,14 @@ sendsig(sig_t catcher, ksiginfo_t *ksi, sigset_t *mask)
 	bzero(sf.sf_uc.uc_mcontext.mc_spare,
 	    sizeof(sf.sf_uc.uc_mcontext.mc_spare));
 	bzero(sf.sf_uc.__spare__, sizeof(sf.sf_uc.__spare__));
+#endif
 
 	/* Allocate space for the signal handler context. */
 	if ((td->td_pflags & TDP_ALTSTACK) != 0 && !oonstack &&
 	    SIGISMEMBER(psp->ps_sigonstack, sig)) {
+#if 1
+    panic ("SVA: signal altstacks not supported!\n");
+#endif
 		sp = td->td_sigstk.ss_sp +
 		    td->td_sigstk.ss_size - sizeof(struct sigframe);
 #if defined(COMPAT_43)
@@ -363,27 +377,69 @@ sendsig(sig_t catcher, ksiginfo_t *ksi, sigset_t *mask)
 		sig = p->p_sysent->sv_sigtbl[_SIG_IDX(sig)];
 
 	/* Build the argument list for the signal handler. */
+#if 0
 	regs->tf_rdi = sig;			/* arg 1 in %rdi */
 	regs->tf_rdx = (register_t)&sfp->sf_uc;	/* arg 3 in %rdx */
+#endif
 	bzero(&sf.sf_si, sizeof(sf.sf_si));
 	if (SIGISMEMBER(psp->ps_siginfo, sig)) {
+#if 0
 		/* Signal handler installed with SA_SIGINFO. */
 		regs->tf_rsi = (register_t)&sfp->sf_si;	/* arg 2 in %rsi */
+#endif
 		sf.sf_ahu.sf_action = (__siginfohandler_t *)catcher;
 
 		/* Fill in POSIX parts */
 		sf.sf_si = ksi->ksi_info;
 		sf.sf_si.si_signo = sig; /* maybe a translated signal */
+#if 0
 		regs->tf_rcx = (register_t)ksi->ksi_addr; /* arg 4 in %rcx */
+#endif
 	} else {
 		/* Old FreeBSD-style arguments. */
+#if 0
 		regs->tf_rsi = ksi->ksi_code;	/* arg 2 in %rsi */
 		regs->tf_rcx = (register_t)ksi->ksi_addr; /* arg 4 in %rcx */
+#endif
 		sf.sf_ahu.sf_handler = catcher;
 	}
 	mtx_unlock(&psp->ps_mtx);
 	PROC_UNLOCK(p);
 
+#if 1
+  /*
+   * Save the interrupt context.
+   */
+  sva_save_icontext ();
+
+  /*
+   * Allocate a signal frame on the stack.
+   */
+  sfp = (struct sigframe *) sva_ialloca (sizeof (struct sigframe), 4, &sf);
+
+  /* Determine the arguments for the signal handler */
+  uintptr_t arg2;
+  uintptr_t arg4;
+	if (SIGISMEMBER(psp->ps_siginfo, sig)) {
+		arg2 = (uintptr_t)&sfp->sf_si;
+		arg4 = (uintptr_t)ksi->ksi_addr;
+  } else {
+		arg2 = ksi->ksi_code;	/* arg 2 in %rsi */
+		arg4 = (register_t)ksi->ksi_addr; /* arg 4 in %rcx */
+  }
+
+  /*
+   * Push the signal handler function on to the user-space stack
+   */
+  sva_ipush_function5 (p->p_sysent->sv_sigcode_base,
+                       sig,
+                       arg2,
+                       (register_t)&sfp->sf_uc,
+                       arg4,
+                       catcher);
+#endif
+
+#if 0
 	/*
 	 * Copy the sigframe out to the user's stack.
 	 */
@@ -394,7 +450,9 @@ sendsig(sig_t catcher, ksiginfo_t *ksi, sigset_t *mask)
 		PROC_LOCK(p);
 		sigexit(td, SIGILL);
 	}
+#endif
 
+#if 0
 	regs->tf_rsp = (long)sfp;
 	regs->tf_rip = p->p_sysent->sv_sigcode_base;
 	regs->tf_rflags &= ~(PSL_T | PSL_D);
@@ -405,6 +463,7 @@ sendsig(sig_t catcher, ksiginfo_t *ksi, sigset_t *mask)
 	regs->tf_gs = _ugssel;
 	regs->tf_flags = TF_HASSEGS;
 	set_pcb_flags(pcb, PCB_FULL_IRET);
+#endif
 	PROC_LOCK(p);
 	mtx_lock(&psp->ps_mtx);
 }
@@ -436,8 +495,14 @@ sys_sigreturn(td, uap)
 	int cs, error, ret;
 	ksiginfo_t ksi;
 
+  /* SVA: FIXME:
+   * We need to copy in the signal mask (or store it somewhere in kernel
+   * memory).
+   */
+#if 0
 	pcb = td->td_pcb;
 	p = td->td_proc;
+#endif
 
 	error = copyin(uap->sigcntxp, &uc, sizeof(uc));
 	if (error != 0) {
@@ -446,6 +511,7 @@ sys_sigreturn(td, uap)
 		return (error);
 	}
 	ucp = &uc;
+#if 0
 	if ((ucp->uc_mcontext.mc_flags & ~_MC_FLAG_MASK) != 0) {
 		uprintf("pid %d (%s): sigreturn mc_flags %x\n", p->p_pid,
 		    td->td_name, ucp->uc_mcontext.mc_flags);
@@ -506,9 +572,17 @@ sys_sigreturn(td, uap)
 	else
 		td->td_sigstk.ss_flags &= ~SS_ONSTACK;
 #endif
+#endif
+
+#if 1
+  /* Load the old interrupted state back on into the interrupt context. */
+  sva_load_icontext ();
+#endif
 
 	kern_sigprocmask(td, SIG_SETMASK, &ucp->uc_sigmask, NULL, 0);
+#if 0
 	set_pcb_flags(pcb, PCB_FULL_IRET);
+#endif
 	return (EJUSTRETURN);
 }
 
@@ -885,10 +959,13 @@ exec_setregs(struct thread *td, struct image_params *imgp, u_long stack)
 	else
 		mtx_unlock(&dt_lock);
 	
+#if 0
 	pcb->pcb_fsbase = 0;
 	pcb->pcb_gsbase = 0;
 	clear_pcb_flags(pcb, PCB_32BIT | PCB_GS32BIT);
+#endif
 	pcb->pcb_initial_fpucw = __INITIAL_FPUCW__;
+#if 0
 	set_pcb_flags(pcb, PCB_FULL_IRET);
 
 	bzero((char *)regs, sizeof(struct trapframe));
@@ -904,7 +981,15 @@ exec_setregs(struct thread *td, struct image_params *imgp, u_long stack)
 	regs->tf_gs = _ugssel;
 	regs->tf_flags = TF_HASSEGS;
 	td->td_retval[1] = 0;
+#else
+#if 1
+  uintptr_t handle = sva_translate (imgp->entry_addr);
+  if (handle)
+    sva_reinit_icontext (handle, 0, ((stack - 8) & ~0xFul) + 8, stack);
+#endif
+#endif
 
+#if 0
 	/*
 	 * Reset the hardware debug registers if they were in use.
 	 * They won't have any meaning for the newly exec'd process.
@@ -926,6 +1011,7 @@ exec_setregs(struct thread *td, struct image_params *imgp, u_long stack)
 		}
 		clear_pcb_flags(pcb, PCB_DBREGS);
 	}
+#endif
 
 	/*
 	 * Drop the FP state if we hold it, so that the process gets a
@@ -945,7 +1031,14 @@ cpu_setregs(void)
 	 * BSP.  See the comments there about why we set them.
 	 */
 	cr0 |= CR0_MP | CR0_NE | CR0_TS | CR0_WP | CR0_AM;
-	load_cr0(cr0);
+	
+    /* Store the new value to cr0 */
+#ifdef SVA_MMU
+	sva_load_cr0(cr0);
+#else
+    load_cr0(cr0);
+#endif
+
 }
 
 /*
@@ -1102,6 +1195,34 @@ setidt(idx, func, typ, dpl, ist)
 	int ist;
 {
 	struct gate_descriptor *ip;
+
+#if 1
+  switch (idx) {
+    case IDT_DB:
+    case IDT_BP:
+    case IDT_DF:
+    case IDT_MF:
+    case IDT_NMI:
+      break;
+
+    default:
+      printf ("SVA: setidt: %d\n", idx);
+      __asm__ __volatile__ ("xchg %%bx, %%bx\n" : : "a" (idx));
+      break;
+  }
+#endif
+
+#if 1
+  /*
+   * Do not change the vectors used by SVA.
+   */
+  if ((idx == 0x7f) || (idx == 0x7e))
+    panic ("SVA: Don't overwrite me!\n");
+
+  if (idx == IDT_DE) return;
+  if (ist == 3)
+    panic ("SVA: Bad IST value!\n");
+#endif
 
 	ip = idt + idx;
 	ip->gd_looffset = (uintptr_t)func;
@@ -1409,7 +1530,7 @@ getmemsize(caddr_t kmdp, u_int64_t first)
 	if (getenv_quad("dcons.addr", &dcons_addr) == 0 ||
 	    getenv_quad("dcons.size", &dcons_size) == 0)
 		dcons_addr = 0;
-
+    
 	/*
 	 * physmap is in bytes, so when converting to page boundaries,
 	 * round up the start address and round down the end address.
@@ -1446,7 +1567,13 @@ getmemsize(caddr_t kmdp, u_int64_t first)
 			/*
 			 * map page into kernel: valid, read/write,non-cacheable
 			 */
+            /* SVA-TODO: enabled this after initialization is figured out */
+#if 0//def SVA_MMU
+            /* Update the mapping to the pte with SVA */
+            sva_update_l1_mapping(pte, (unsigned long) (pa | PG_V | PG_RW | PG_N));
+#else
 			*pte = pa | PG_V | PG_RW | PG_N;
+#endif
 			invltlb();
 
 			tmp = *(int *)ptr;
@@ -1528,7 +1655,14 @@ do_next:
 				break;
 		}
 	}
+
+    /* SVA-TODO: enabled this after initialization is figured out */
+#if 0//def SVA_MMU
+    /* Update the mapping to the pte with SVA */
+    sva_update_l1_mapping(pte, 0);
+#else
 	*pte = 0;
+#endif
 	invltlb();
 
 	/*
@@ -1552,6 +1686,19 @@ do_next:
 	/* Map the message buffer. */
 	msgbufp = (struct msgbuf *)PHYS_TO_DMAP(phys_avail[pa_indx]);
 }
+
+#if 1
+/*
+ * Function: spurious_handler()
+ *
+ * Description:
+ *  Handle (ignore) spurious APIC interrupts.
+ */
+void
+spurious_handler (unsigned intNum, sva_icontext_t * p) {
+  return;
+}
+#endif
 
 u_int64_t
 hammer_time(u_int64_t modulep, u_int64_t physfree)
@@ -1611,9 +1758,24 @@ hammer_time(u_int64_t modulep, u_int64_t physfree)
 
 	wrmsr(MSR_FSBASE, 0);		/* User value */
 	wrmsr(MSR_GSBASE, (u_int64_t)pc);
+#if 0
 	wrmsr(MSR_KGSBASE, 0);		/* User value while in the kernel */
+#else
+	wrmsr(MSR_KGSBASE, (u_int64_t)pc);		/* User value while in the kernel */
+#endif
 
 	pcpu_init(pc, 0, sizeof(struct pcpu));
+#if 1
+  /*
+   * Initialize the rest of the PCPU structures because we need them for
+   * proper SVA interrupt handling.
+   */
+  for (unsigned index = 0; index < MAXCPU; ++index) {
+    if (!(__pcpu[index].svaIContext = sva_getCPUState(&(common_tss[index])))) {
+      panic ("SVA: Unable to setup interrupt context for this processor\n");
+    }
+  }
+#endif
 	dpcpu_init((void *)(physfree + KERNBASE), 0);
 	physfree += DPCPU_SIZE;
 	PCPU_SET(prvspace, pc);
@@ -1638,35 +1800,79 @@ hammer_time(u_int64_t modulep, u_int64_t physfree)
 	mtx_init(&icu_lock, "icu", NULL, MTX_SPIN | MTX_NOWITNESS);
 	mtx_init(&dt_lock, "descriptor tables", NULL, MTX_DEF);
 
+#if 1
+  /*
+   * Initialize the SVA virtual machine on the primary processor.
+   */
+  sva_init_primary();
+#endif
+
 	/* exceptions */
+#if 0
 	for (x = 0; x < NIDT; x++)
 		setidt(x, &IDTVEC(rsvd), SDT_SYSIGT, SEL_KPL, 0);
+#endif
+#if 1
+	extern void fr_sva_trap(int type);
+#endif
+#if 0
 	setidt(IDT_DE, &IDTVEC(div),  SDT_SYSIGT, SEL_KPL, 0);
+#else
+	sva_register_general_exception(IDT_DE, fr_sva_trap);
+#endif
 	setidt(IDT_DB, &IDTVEC(dbg),  SDT_SYSIGT, SEL_KPL, 0);
-	setidt(IDT_NMI, &IDTVEC(nmi),  SDT_SYSIGT, SEL_KPL, 2);
  	setidt(IDT_BP, &IDTVEC(bpt),  SDT_SYSIGT, SEL_UPL, 0);
+#if 0
 	setidt(IDT_OF, &IDTVEC(ofl),  SDT_SYSIGT, SEL_KPL, 0);
 	setidt(IDT_BR, &IDTVEC(bnd),  SDT_SYSIGT, SEL_KPL, 0);
 	setidt(IDT_UD, &IDTVEC(ill),  SDT_SYSIGT, SEL_KPL, 0);
+#else
+	sva_register_general_exception(IDT_OF, fr_sva_trap);
+	sva_register_general_exception(IDT_BR, fr_sva_trap);
+	sva_register_general_exception(IDT_UD, fr_sva_trap);
+#endif
+#if 0
 	setidt(IDT_NM, &IDTVEC(dna),  SDT_SYSIGT, SEL_KPL, 0);
+#endif
 	setidt(IDT_DF, &IDTVEC(dblfault), SDT_SYSIGT, SEL_KPL, 1);
+#if 0
 	setidt(IDT_FPUGP, &IDTVEC(fpusegm),  SDT_SYSIGT, SEL_KPL, 0);
+#else
+	sva_register_general_exception(IDT_FPUGP, fr_sva_trap);
+#endif
+#if 0
 	setidt(IDT_TS, &IDTVEC(tss),  SDT_SYSIGT, SEL_KPL, 0);
 	setidt(IDT_NP, &IDTVEC(missing),  SDT_SYSIGT, SEL_KPL, 0);
 	setidt(IDT_SS, &IDTVEC(stk),  SDT_SYSIGT, SEL_KPL, 0);
+#endif
+#if 0
+	setidt(IDT_NMI, &IDTVEC(nmi),  SDT_SYSIGT, SEL_KPL, 2);
 	setidt(IDT_GP, &IDTVEC(prot),  SDT_SYSIGT, SEL_KPL, 0);
 	setidt(IDT_PF, &IDTVEC(page),  SDT_SYSIGT, SEL_KPL, 0);
+#else
+	setidt(IDT_NMI, &IDTVEC(nmi),  SDT_SYSIGT, SEL_KPL, 2);
+	sva_register_general_exception(IDT_GP, fr_sva_trap);
+	sva_register_general_exception(IDT_PF, fr_sva_trap);
+#endif
 	setidt(IDT_MF, &IDTVEC(fpu),  SDT_SYSIGT, SEL_KPL, 0);
+#if 0
 	setidt(IDT_AC, &IDTVEC(align), SDT_SYSIGT, SEL_KPL, 0);
 	setidt(IDT_MC, &IDTVEC(mchk),  SDT_SYSIGT, SEL_KPL, 0);
 	setidt(IDT_XF, &IDTVEC(xmm), SDT_SYSIGT, SEL_KPL, 0);
+#else
+	sva_register_general_exception(IDT_AC, fr_sva_trap);
+	sva_register_general_exception(IDT_MC, fr_sva_trap);
+	sva_register_general_exception(IDT_XF, fr_sva_trap);
+#endif
 #ifdef KDTRACE_HOOKS
 	setidt(IDT_DTRACE_RET, &IDTVEC(dtrace_ret), SDT_SYSIGT, SEL_UPL, 0);
 #endif
 
+#if 0
 	r_idt.rd_limit = sizeof(idt0) - 1;
 	r_idt.rd_base = (long) idt;
 	lidt(&r_idt);
+#endif
 
 	/*
 	 * Initialize the i8254 before the console so that console
@@ -1691,8 +1897,13 @@ hammer_time(u_int64_t modulep, u_int64_t physfree)
 	 * Point the ICU spurious interrupt vectors at the APIC spurious
 	 * interrupt handler.
 	 */
+#if 0
 	setidt(IDT_IO_INTS + 7, IDTVEC(spuriousint), SDT_SYSIGT, SEL_KPL, 0);
 	setidt(IDT_IO_INTS + 15, IDTVEC(spuriousint), SDT_SYSIGT, SEL_KPL, 0);
+#else
+	sva_register_interrupt(IDT_IO_INTS + 7, spurious_handler);
+	sva_register_interrupt(IDT_IO_INTS + 15, spurious_handler);
+#endif
 #endif
 #else
 #error "have you forgotten the isa device?";
@@ -1738,8 +1949,16 @@ hammer_time(u_int64_t modulep, u_int64_t physfree)
 	/* Set up the fast syscall stuff */
 	msr = rdmsr(MSR_EFER) | EFER_SCE;
 	wrmsr(MSR_EFER, msr);
+#if 1
 	wrmsr(MSR_LSTAR, (u_int64_t)IDTVEC(fast_syscall));
 	wrmsr(MSR_CSTAR, (u_int64_t)IDTVEC(fast_syscall32));
+#else
+  {
+    extern void SVAsyscall(void);
+    wrmsr(MSR_LSTAR, (u_int64_t)SVAsyscall);
+    wrmsr(MSR_CSTAR, (u_int64_t)IDTVEC(fast_syscall32));
+  }
+#endif
 	msr = ((u_int64_t)GSEL(GCODE_SEL, SEL_KPL) << 32) |
 	      ((u_int64_t)GSEL(GUCODE32_SEL, SEL_UPL) << 48);
 	wrmsr(MSR_STAR, msr);
@@ -1747,9 +1966,9 @@ hammer_time(u_int64_t modulep, u_int64_t physfree)
 
 	getmemsize(kmdp, physfree);
 	init_param2(physmem);
-
+    
 	/* now running on new page tables, configured,and u/iom is accessible */
-
+    
 	msgbufinit(msgbufp, msgbufsize);
 	fpuinit();
 
@@ -1770,6 +1989,9 @@ hammer_time(u_int64_t modulep, u_int64_t physfree)
 	thread0.td_pcb->pcb_cr3 = KPML4phys;
 	thread0.td_frame = &proc0_tf;
 
+#if 1
+  thread0.svaID = 0;
+#endif
         env = getenv("kernelname");
 	if (env != NULL)
 		strlcpy(kernelname, env, sizeof(kernelname));
@@ -2395,6 +2617,254 @@ user_dbreg_trap(void)
          * None of the breakpoints are in user space.
          */
         return 0;
+}
+
+/*
+ * Function: cpu_switch_sva()
+ *
+ * Description:
+ *  This is a replacement for the architecture-dependent context-switch
+ *  function, cpu_switch().  This version uses SVA to do the context switching.
+ */
+void
+cpu_switch_sva (struct thread * old, struct thread * new, struct mtx * mtx)
+{
+  /* Context switch result */
+  uintptr_t didSwap;
+  uintptr_t rsp;
+
+#if 0
+  printf ("SVA: switch: [%d:%d](%lx/%d) -> [%d:%d](%lx:%d)\n",
+          old->td_proc->p_pid, old->td_tid, old->svaID, old->sva,
+          new->td_proc->p_pid, new->td_tid, new->svaID, new->sva);
+  printf ("SVA: switch: %p %p\n", old->td_lock, new->td_lock);
+#endif
+
+  /*
+   * Tell the new process which process was running before it.
+   */
+  new->prev = old;
+  new->mtx = mtx;
+
+  /*
+   * Use SVA to context switch from the old thread to the new thread.
+   */
+  if (new->sva) {
+    /*
+     * Mark that the old process is about to have SVA state saved for it.
+     */
+    old->sva = 1;
+
+    /*
+     * Release the old thread (I think this does some unlocking stuff when
+     * sharing page tables).
+     */
+    if ((old->td_pcb->pcb_cr3) == (new->td_pcb->pcb_cr3)) {
+      /* Release the old thread */
+      mtx = __sync_lock_test_and_set (&(old->td_lock), mtx);
+    } else {
+#if SVA_DEBUG
+      printf("-- Calling sva load pagetable...\n");
+#endif
+      /*
+       * Switch to the new page table.
+       */
+      sva_mm_load_pgtable (new->td_pcb->pcb_cr3);
+
+#if SVA_DEBUG
+      printf("-- Finished sva load pagetable...\n");
+#endif
+
+      /*
+       * Fetch the pmap (physical page mapping) structure from the per-CPU
+       * data structure.
+       */
+      struct pmap * pmap = PCPU_GET(curpmap);
+
+      /*
+       * Change the flag in pmap based on the current active CPU.
+       */
+      unsigned int cpuid = PCPU_GET(cpuid);
+      __asm__ __volatile__ ("lock btrl %1, %0\n"
+                            : "=m" (pmap->pm_active)
+                            : "r" (cpuid));
+
+      /* Release the old thread */
+      mtx = __sync_lock_test_and_set (&(old->td_lock), mtx);
+
+      /*
+       * Set the flag in the new process's pmap structure.
+       */
+      __asm__ __volatile__ ("lock btsl %1, %0\n"
+                            : "=m" (new->td_proc->p_vmspace->vm_pmap.pm_active)
+                            : "r" (cpuid));
+
+      PCPU_SET (curpmap, &(new->td_proc->p_vmspace->vm_pmap));
+    }
+
+#if defined(SCHED_ULE) && defined(SMP)
+    panic ("SVA: SMP Swap Start\n");
+    /* Do some locking blocking stuff for the ULE scheduler */
+    extern struct mtx blocked_lock;
+    while (old->td_lock == &blocked_lock) {
+      __asm__ __volatile__ ("pause");
+    }
+    printf ("SVA: SMP Swap End\n");
+#endif
+
+    /*
+     * Update the FreeBSD per-cpu data structure to know which thread is
+     * running on this CPU.
+     */
+    PCPU_SET (curthread, new);
+
+    /*
+     * Swap to the new state.
+     */
+    didSwap = sva_swap_integer (new->svaID, &(old->svaID));
+  } else {
+#if 0
+    /* Do an old style context switch */
+    old->sva = 0;
+    cpu_switch(old, new, mtx);
+    printf ("SVA: Returned to kernel from FreeBSD!\n");
+    return 0;
+#else
+    panic ("SVA: Should not do old context switch anymore!\n");
+#endif
+  }
+
+  /*
+   * If the process that we took off the processor is a zombie, get rid of its
+   * SVA state.  It will never go on the CPU again.
+   */
+  if (curthread->prev->td_proc->p_state == PRS_ZOMBIE) {
+    sva_release_stack (curthread->prev->svaID);
+  }
+  return;
+}
+
+/*
+ * Function: cpu_throw_sva()
+ *
+ * Description:
+ *  This is a replacement for the architecture-dependent context-switch
+ *  function, cpu_throw().  This version uses SVA to do the context switching.
+ */
+void
+cpu_throw_sva (struct thread * old, struct thread * new, struct mtx * mtx)
+{
+  /* Context switch result */
+  uintptr_t didSwap;
+  uintptr_t rsp;
+
+#if 0
+  printf ("SVA: switch: [%d:%d](%lx/%d) -> [%d:%d](%lx:%d)\n",
+          old->td_proc->p_pid, old->td_tid, old->svaID, old->sva,
+          new->td_proc->p_pid, new->td_tid, new->svaID, new->sva);
+  printf ("SVA: switch: %p %p\n", old->td_lock, new->td_lock);
+#endif
+
+  /*
+   * Tell the new process which process was running before it.
+   */
+  new->prev = old;
+  new->mtx = mtx;
+
+  /*
+   * Use SVA to context switch from the old thread to the new thread.
+   */
+  if (new->sva) {
+    /*
+     * Mark that the old process is about to have SVA state saved for it.
+     */
+    old->sva = 1;
+
+    /*
+     * Release the old thread (I think this does some unlocking stuff when
+     * sharing page tables).
+     */
+    if ((old->td_pcb->pcb_cr3) == (new->td_pcb->pcb_cr3)) {
+      /* Release the old thread */
+      mtx = __sync_lock_test_and_set (&(old->td_lock), mtx);
+    } else {
+#if SVA_DEBUG
+      printf("-- Calling sva load pagetable...\n");
+#endif
+      /*
+       * Switch to the new page table.
+       */
+      sva_mm_load_pgtable (new->td_pcb->pcb_cr3);
+
+#if SVA_DEBUG
+      printf("-- Finished sva load pagetable...\n");
+#endif
+
+      /*
+       * Fetch the pmap (physical page mapping) structure from the per-CPU
+       * data structure.
+       */
+      struct pmap * pmap = PCPU_GET(curpmap);
+
+      /*
+       * Change the flag in pmap based on the current active CPU.
+       */
+      unsigned int cpuid = PCPU_GET(cpuid);
+      __asm__ __volatile__ ("lock btrl %1, %0\n"
+                            : "=m" (pmap->pm_active)
+                            : "r" (cpuid));
+
+      /* Release the old thread */
+      mtx = __sync_lock_test_and_set (&(old->td_lock), mtx);
+
+      /*
+       * Set the flag in the new process's pmap structure.
+       */
+      __asm__ __volatile__ ("lock btsl %1, %0\n"
+                            : "=m" (new->td_proc->p_vmspace->vm_pmap.pm_active)
+                            : "r" (cpuid));
+
+      PCPU_SET (curpmap, &(new->td_proc->p_vmspace->vm_pmap));
+    }
+
+#if defined(SCHED_ULE) && defined(SMP)
+    panic ("SVA: SMP Swap Start\n");
+    /* Do some locking blocking stuff for the ULE scheduler */
+    extern struct mtx blocked_lock;
+    while (old->td_lock == &blocked_lock) {
+      __asm__ __volatile__ ("pause");
+    }
+    printf ("SVA: SMP Swap End\n");
+#endif
+
+    /*
+     * Update the FreeBSD per-cpu data structure to know which thread is
+     * running on this CPU.
+     */
+    PCPU_SET (curthread, new);
+
+    /*
+     * Swap to the new state.
+     */
+    didSwap = sva_swap_integer (new->svaID, &(old->svaID));
+  } else {
+#if 0
+    /* Do an old style context switch */
+    old->sva = 0;
+    cpu_switch(old, new, mtx);
+    printf ("SVA: Returned to kernel from FreeBSD!\n");
+    return 0;
+#else
+    panic ("SVA: Should not do old context switch anymore!\n");
+#endif
+  }
+
+  /*
+   * Release the old thread as we don't need it anymore.
+   */
+  printf ("FreeBSD: Releasing %x\n", curthread->prev->svaID);
+  sva_release_stack (curthread->prev->svaID);
+  return;
 }
 
 #ifdef KDB

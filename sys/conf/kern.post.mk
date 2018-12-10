@@ -90,10 +90,10 @@ gdbinit:
 .endif
 .endif
 
-${FULLKERNEL}: ${SYSTEM_DEP} vers.o
+${FULLKERNEL}: ${SYSTEM_DEP} vers.o $S/../../../SVA/lib/libsva.a
 	@rm -f ${.TARGET}
-	@echo linking ${.TARGET}
-	${SYSTEM_LD}
+	@echo linking SVA ${.TARGET}
+	${SYSTEM_LD} -L$S/../../../SVA/lib -lsva
 	@${SYSTEM_CTFMERGE}
 .if !defined(DEBUG)
 	${OBJCOPY} --strip-debug ${.TARGET}
