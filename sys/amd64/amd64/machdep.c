@@ -343,13 +343,16 @@ sendsig(sig_t catcher, ksiginfo_t *ksi, sigset_t *mask)
 	sf.sf_uc.uc_stack = td->td_sigstk;
 	sf.sf_uc.uc_stack.ss_flags = (td->td_pflags & TDP_ALTSTACK)
 	    ? ((oonstack) ? SS_ONSTACK : 0) : SS_DISABLE;
+
+	sf.sf_uc.uc_mcontext.mc_fsbase = pcb->pcb_fsbase;	/* fsbase */
+
 #if 0
 	sf.sf_uc.uc_mcontext.mc_onstack = (oonstack) ? 1 : 0;
 	bcopy(regs, &sf.sf_uc.uc_mcontext.mc_rdi, sizeof(*regs));
 	sf.sf_uc.uc_mcontext.mc_len = sizeof(sf.sf_uc.uc_mcontext); /* magic */
 	get_fpcontext(td, &sf.sf_uc.uc_mcontext);
 	fpstate_drop(td);
-	sf.sf_uc.uc_mcontext.mc_fsbase = pcb->pcb_fsbase;
+	sf.sf_uc.uc_mcontext.mc_fsbase = pcb->pcb_fsbase;	/* fsbase */
 	sf.sf_uc.uc_mcontext.mc_gsbase = pcb->pcb_gsbase;
 	bzero(sf.sf_uc.uc_mcontext.mc_spare,
 	    sizeof(sf.sf_uc.uc_mcontext.mc_spare));
@@ -452,6 +455,11 @@ sendsig(sig_t catcher, ksiginfo_t *ksi, sigset_t *mask)
 	}
 #endif
 
+	regs->tf_cs = _ucodesel;		/* this would affect tls */
+	regs->tf_fs = _ufssel;			/* this would affect tls */
+	regs->tf_flags = TF_HASSEGS;
+	set_pcb_flags(pcb, PCB_FULL_IRET); /* this would affect tls */
+
 #if 0
 	regs->tf_rsp = (long)sfp;
 	regs->tf_rip = p->p_sysent->sv_sigcode_base;
@@ -504,6 +512,9 @@ sys_sigreturn(td, uap)
 	p = td->td_proc;
 #endif
 
+	pcb = td->td_pcb;		/** to recover fsbase related operations */
+	p = td->td_proc;
+
 	error = copyin(uap->sigcntxp, &uc, sizeof(uc));
 	if (error != 0) {
 		uprintf("pid %d (%s): sigreturn copyin failed\n",
@@ -511,14 +522,17 @@ sys_sigreturn(td, uap)
 		return (error);
 	}
 	ucp = &uc;
+
+	regs = td->td_frame;						/**for fsbase **/
+
 #if 0
-	if ((ucp->uc_mcontext.mc_flags & ~_MC_FLAG_MASK) != 0) {
+	if ((ucp->uc_mcontext.mc_flags & ~_MC_FLAG_MASK) != 0) {		/**  for fsbase **/
 		uprintf("pid %d (%s): sigreturn mc_flags %x\n", p->p_pid,
 		    td->td_name, ucp->uc_mcontext.mc_flags);
 		return (EINVAL);
 	}
-	regs = td->td_frame;
-	rflags = ucp->uc_mcontext.mc_rflags;
+	regs = td->td_frame;						/**for fsbase **/
+	rflags = ucp->uc_mcontext.mc_rflags;		/** for fsbase **/
 	/*
 	 * Don't allow users to change privileged or reserved flags.
 	 */
@@ -562,8 +576,8 @@ sys_sigreturn(td, uap)
 		    p->p_pid, td->td_name, ret);
 		return (ret);
 	}
-	bcopy(&ucp->uc_mcontext.mc_rdi, regs, sizeof(*regs));
-	pcb->pcb_fsbase = ucp->uc_mcontext.mc_fsbase;
+	bcopy(&ucp->uc_mcontext.mc_rdi, regs, sizeof(*regs));	/* for fsbase */
+	pcb->pcb_fsbase = ucp->uc_mcontext.mc_fsbase;			/* this fsbase related to TLS */
 	pcb->pcb_gsbase = ucp->uc_mcontext.mc_gsbase;
 
 #if defined(COMPAT_43)
@@ -574,6 +588,8 @@ sys_sigreturn(td, uap)
 #endif
 #endif
 
+	pcb->pcb_fsbase = ucp->uc_mcontext.mc_fsbase;			/* this fsbase related to TLS */
+
 #if 1
   /* Load the old interrupted state back on into the interrupt context. */
   sva_load_icontext ();
@@ -581,8 +597,9 @@ sys_sigreturn(td, uap)
 
 	kern_sigprocmask(td, SIG_SETMASK, &ucp->uc_sigmask, NULL, 0);
 #if 0
-	set_pcb_flags(pcb, PCB_FULL_IRET);
+	set_pcb_flags(pcb, PCB_FULL_IRET); /* for fsbase */
 #endif
+	set_pcb_flags(pcb, PCB_FULL_IRET); /* for fsbase */
 	return (EJUSTRETURN);
 }
 
@@ -959,14 +976,25 @@ exec_setregs(struct thread *td, struct image_params *imgp, u_long stack)
 	else
 		mtx_unlock(&dt_lock);
 	
+	pcb->pcb_fsbase = 0;	/** fsbase **/
+
 #if 0
-	pcb->pcb_fsbase = 0;
 	pcb->pcb_gsbase = 0;
-	clear_pcb_flags(pcb, PCB_32BIT | PCB_GS32BIT);
 #endif
+	clear_pcb_flags(pcb, PCB_32BIT | PCB_GS32BIT);
+
 	pcb->pcb_initial_fpucw = __INITIAL_FPUCW__;
-#if 0
+
+	/* re-enable fsbase related regs.*/
 	set_pcb_flags(pcb, PCB_FULL_IRET);
+	bzero((char *)regs, sizeof(struct trapframe));
+	regs->tf_rflags = PSL_USER | (regs->tf_rflags & PSL_T); /* TODO: fsbase related or not? */
+	regs->tf_cs = _ucodesel;		/** for fsbase SEL_RPL_MASK **/
+	regs->tf_fs = _ufssel;			/** fsbase **/
+	regs->tf_flags = TF_HASSEGS; 	/** fsbase **/
+
+#if 0
+	set_pcb_flags(pcb, PCB_FULL_IRET); /* fsbase */
 
 	bzero((char *)regs, sizeof(struct trapframe));
 	regs->tf_rip = imgp->entry_addr;
@@ -974,12 +1002,12 @@ exec_setregs(struct thread *td, struct image_params *imgp, u_long stack)
 	regs->tf_rdi = stack;		/* argv */
 	regs->tf_rflags = PSL_USER | (regs->tf_rflags & PSL_T);
 	regs->tf_ss = _udatasel;
-	regs->tf_cs = _ucodesel;
+	regs->tf_cs = _ucodesel;	/** for fsbase **/
 	regs->tf_ds = _udatasel;
 	regs->tf_es = _udatasel;
-	regs->tf_fs = _ufssel;
+	regs->tf_fs = _ufssel;		/** for fsbase **/
 	regs->tf_gs = _ugssel;
-	regs->tf_flags = TF_HASSEGS;
+	regs->tf_flags = TF_HASSEGS; /** for/** fsbase **/ fsbase **/
 	td->td_retval[1] = 0;
 #else
 #if 1
@@ -2619,6 +2647,87 @@ user_dbreg_trap(void)
         return 0;
 }
 
+/**
+* missing part 1 compared to cpu_switch.S.
+*/
+static inline void sva_missing_part1_set_pcb_flag(struct thread *old){
+
+	/* movq	TD_PCB(%rdi),%r8 
+	orl	$PCB_FULL_IRET,PCB_FLAGS(%r8)  //  : full iret is set to 1
+	*/
+	old->td_pcb->pcb_flags |= PCB_FULL_IRET;
+
+}
+
+
+/* loading the new thread: 
+* At this point, we've switched address spaces and are ready
+* to load up the rest of the next context.
+*/
+static inline void sva_missing_part2_load_new_thr(struct thread *new){
+
+	/* Skip loading user fsbase/gsbase for kthreads 
+	testl	$TDP_KTHREAD,TD_PFLAGS(%rsi)  /* src/sys/sys/proc.h:426:#define	TDP_KTHREAD	0x00200000 // This is an official kernel thread 
+	jnz	do_kthread
+	*/
+	if ((new->td_pflags & TDP_KTHREAD) == 0){
+		// loading user fsbase/gsbase for user threads
+        if (new->td_proc->p_md.md_ldt != 0 ){
+			// do_ldt
+			set_user_ldt(&new->td_proc->p_md);
+
+	    }else{
+			lldt(0);
+	    }
+
+	    /* Restore fs base in GDT  */
+
+		uint64_t fsbse64__ = new->td_pcb->pcb_fsbase; 
+		unsigned int fsbse_low_ = (unsigned int)new->td_pcb->pcb_fsbase; 
+		struct user_segment_descriptor * pc_fs32p__ = PCPU_GET(fs32p);
+
+		USD_SETBASE(pc_fs32p__, fsbse_low_);
+
+		uint64_t pc_fs32p_int64;
+		memcpy(&pc_fs32p_int64, pc_fs32p__, sizeof(struct user_segment_descriptor));
+
+	}
+	 /* do_kthread: */
+	 struct amd64tss *pc_tssp_rax__ = PCPU_GET(tssp);
+
+	 struct amd64tss *pcb_tssp_rdx__ = new->td_pcb->pcb_tssp;
+	 if ( pcb_tssp_rdx__ == 0){
+	 	pcb_tssp_rdx__ = PCPU_GET(commontssp);
+	 }
+
+	 if ( pc_tssp_rax__ != pcb_tssp_rdx__){
+	 	// do_tss
+
+	 	PCPU_SET(tssp, pcb_tssp_rdx__);
+
+	 	struct system_segment_descriptor *pc_tss_rax__ = PCPU_GET(tss);
+
+		pc_tss_rax__->sd_lobase = (u_long)pcb_tssp_rdx__ & 0xffffff;
+		pc_tss_rax__->sd_hibase = ((u_long)pcb_tssp_rdx__ >> 24) & 0xfffffffffful;
+		pc_tss_rax__->sd_type = SDT_SYSTSS;
+		pc_tss_rax__->sd_p = 1;
+		ltr(GSEL(GPROC0_SEL, SEL_KPL));
+
+	 }
+
+	 /* done_tss: */
+	 PCPU_SET(rsp0, new->td_pcb);
+	 PCPU_SET(curpcb, new->td_pcb);
+	 //new->td_pcb->pcb_tssp->tss_rsp0 = new->td_pcb; // spin lock too long/stuck here
+	 //pcb_tssp_rdx__->tss_rsp0 = new->td_pcb; // masked for geom trap 14 in kernel
+
+	 /**
+	  * DONE missing part 2.
+	  * The last statement movq %rsi,PCPU(CURTHREAD) is done in original SVA immediately after this function 
+	  */
+
+}
+
 /*
  * Function: cpu_switch_sva()
  *
@@ -2650,6 +2759,9 @@ cpu_switch_sva (struct thread * old, struct thread * new, struct mtx * mtx)
    * Use SVA to context switch from the old thread to the new thread.
    */
   if (new->sva) {
+
+	sva_missing_part1_set_pcb_flag(old);
+
     /*
      * Mark that the old process is about to have SVA state saved for it.
      */
@@ -2711,6 +2823,8 @@ cpu_switch_sva (struct thread * old, struct thread * new, struct mtx * mtx)
     }
     printf ("SVA: SMP Swap End\n");
 #endif
+
+	sva_missing_part2_load_new_thr(new);
 
     /*
      * Update the FreeBSD per-cpu data structure to know which thread is
@@ -2836,6 +2950,8 @@ cpu_throw_sva (struct thread * old, struct thread * new, struct mtx * mtx)
     }
     printf ("SVA: SMP Swap End\n");
 #endif
+
+	sva_missing_part2_load_new_thr(new);
 
     /*
      * Update the FreeBSD per-cpu data structure to know which thread is
