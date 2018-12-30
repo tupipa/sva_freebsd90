@@ -2365,6 +2365,9 @@ set_mcontext(struct thread *td, const mcontext_t *mcp)
 		pcb->pcb_gsbase = mcp->mc_gsbase;
 	}
 	set_pcb_flags(pcb, PCB_FULL_IRET);
+
+	/* update fsbase in SVA */
+	sva_init_fsbase(td->svaID, pcb->pcb_fsbase); // never reached here yet.
 	return (0);
 }
 
@@ -2716,7 +2719,10 @@ cpu_switch_sva (struct thread * old, struct thread * new, struct mtx * mtx)
      * Update the FreeBSD per-cpu data structure to know which thread is
      * running on this CPU.
      */
+
+    PCPU_SET(curpcb, new->td_pcb);
     PCPU_SET (curthread, new);
+
 
     /*
      * Swap to the new state.
@@ -2841,6 +2847,8 @@ cpu_throw_sva (struct thread * old, struct thread * new, struct mtx * mtx)
      * Update the FreeBSD per-cpu data structure to know which thread is
      * running on this CPU.
      */
+
+    PCPU_SET(curpcb, new->td_pcb);
     PCPU_SET (curthread, new);
 
     /*
